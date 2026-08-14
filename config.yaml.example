@@ -1,0 +1,113 @@
+# chatterbox configuration.
+#
+# Copy to config.yaml (gitignored as config.local.yaml, or keep outside the
+# repo at ~/.config/chatterbox/config.yaml) and edit. Every value here is a
+# default that can be omitted; secrets are never stored in this file, only the
+# name of the environment variable to read them from.
+
+slack:
+  # The bot token must be in this environment variable. A bot token is required
+  # rather than an incoming webhook, because webhooks cannot upload the plots.
+  # Scopes needed: chat:write, files:write.
+  bot_token_env: SLACK_BOT_TOKEN
+  channel: "#too-alerts"
+  # Where alerts flagged is_test go. Leave empty to send them to `channel`,
+  # where they are still visibly marked as tests.
+  test_channel: "#too-alerts-test"
+  username: chatterbox
+  icon_emoji: ":satellite:"
+  # Slack IDs to @-mention on non-test alerts, e.g. ["!subteam^S01ABCDEF"].
+  mention: []
+
+ingest:
+  # kafka: subscribe to the ToO producer's output topic via hop-client.
+  # files:  watch a directory that forward_alerts.py's FileSender writes into.
+  kind: files
+
+  # Topic names are deployment configuration -- there are none in the
+  # rubin-ToO-producer repository -- so this must be filled in for kafka mode.
+  # Authentication is delegated to hop-client's own ~/.config/hop/auth.toml.
+  kafka_url: ""            # e.g. "kafka://kafka.scimma.org/lsst.rubin-too-alerts"
+  kafka_group_id: chatterbox
+
+  watch_dir: ~/.chatterbox/incoming
+  poll_interval_s: 2.0
+  # Process alerts flagged is_test. Set false to drop them entirely.
+  allow_tests: true
+
+dark_hours:
+  # Resolution of the accessible-dark-hours map. 64 takes about 0.3 s; 128
+  # takes about 1.5 s.
+  nside: 64
+  step_minutes: 5.0
+  # Airmass < 2 corresponds to altitude > 30 degrees.
+  airmass_limit: 2.0
+  # Must be -12 or -18: the almanac provides those two crossings.
+  sun_alt_limit_deg: -12.0
+  # Set > 0 to also exclude pixels within this many degrees of the Moon.
+  moon_avoidance_deg: 0.0
+
+templates:
+  nside: 256
+  fov_radius_deg: 1.75
+  min_visits: 1
+  bands: ["u", "g", "r", "i", "z", "y"]
+  cache_dir: ~/.chatterbox/templates
+  # Rebuilt by `chatterbox refresh-templates`. Run it from cron so the cache
+  # stays current; its build time is shown in every post.
+  instrument: lsstcam
+  consdb_site: usdf
+  consdb_tokenfile: ~/.lsst/usdf_rsp
+  # Set to build from a ConsDB visit export instead of querying ConsDB.
+  visit_csv: ""
+
+enrich:
+  # For GW alerts the `source` field is the GraceDB superevent id, so the real
+  # skymap, distance, FAR and classification can be recovered -- none of which
+  # the producer's output record carries. Best-effort and time-bounded; on
+  # failure the post falls back to area-based figures and says so.
+  gracedb: true
+  gracedb_service_url: "https://gracedb.ligo.org/api/"
+  timeout_s: 8.0
+  cache_dir: ~/.chatterbox/skymaps
+
+sim:
+  enabled: true
+  # An interpreter with rubin_scheduler and lsst_survey_sim importable. The
+  # simulation runs as a subprocess, so this need not be the bot's own
+  # interpreter.
+  python: ~/mamba/envs/scheduler_dev_env/bin/python
+  lsst_survey_sim: ~/Desktop/Repos/lsst_survey_sim
+  ts_config_scheduler: ~/Desktop/Repos/ts_config_scheduler
+  # Must be the tree containing sim_baseline.
+  rubin_sim_data: ~/RubinUtils/rubin_sim_data
+  # Pre-fetched visit history; see rubin_nights/scripts/make_opsim.py.
+  opsim_h5: ~/Desktop/Repos/lsst_survey_sim/notebooks2/opsim.h5
+  # 0 uses the per-alert-class default (GW 20, BBH 50, neutrino 30, SNe/SSO 5).
+  nights_override: 0
+  timeout_s: 7200.0
+  artifact_base_url: ""
+
+  # Filter carousel swap schedule. lsst_survey_sim's built-in schedule ends
+  # 2026-03-25 and then falls back to choosing bands from Moon illumination,
+  # which silently drops requested u (and often r/i) visits. Set a current
+  # schedule here to override it. Whichever path is used is reported in the
+  # threaded reply, so an empty setting is safe but visible.
+  band_swap_schedule: {}
+  #  "2026-04-07": ["u", "g", "r", "i", "z"]
+  #  "2026-04-21": ["g", "r", "i", "z", "y"]
+  band_swap_end_date: ""
+
+paths:
+  work_dir: ~/.chatterbox/work
+
+links:
+  # No weather link existed in any of the sibling repositories, so these are
+  # starting points to be replaced with whatever you actually want on-call
+  # people to open.
+  weather: "https://www.meteoblue.com/en/weather/week/cerro-pach%c3%b3n_chile_3897347"
+  seeing: "https://noirlab.edu/science/observing-noirlab/weather-webcams/cerro-pachon"
+  almanac: ""
+  observatory_status: ""
+  extra: {}
+  #  "Nightly digest": "https://usdf-rsp.slac.stanford.edu/times-square/..."

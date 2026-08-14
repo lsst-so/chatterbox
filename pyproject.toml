@@ -1,0 +1,113 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chatterbox"
+description = "Low-latency Slack reporting for Rubin multi-messenger targets of opportunity"
+readme = "README.md"
+license = { text = "GPL" }
+requires-python = ">=3.11"
+dynamic = ["version"]
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "astropy",
+    "astropy-healpix",
+    "healpy",
+    "pandas",
+    "pyyaml",
+    "requests",
+]
+
+[project.optional-dependencies]
+# The astronomy stack that also powers the scheduler simulation. Installed in
+# ~/mamba/envs/scheduler_dev_env already; listed here for fresh environments.
+rubin = [
+    "rubin-scheduler",
+    "rubin-nights",
+    "ligo.skymap",
+    "ligo-gracedb",
+    "skyproj",
+    "astroplan",
+    "tables",
+]
+# Alert transport. hop-client is only needed for the Kafka ingest source; the
+# file and replay sources work without it.
+kafka = [
+    "hop-client>=0.11.0",
+    "fastavro",
+]
+slack = [
+    "slack-sdk",
+]
+test = [
+    "pytest",
+    "pytest-cov",
+    "black",
+    "ruff",
+    "isort",
+]
+
+[project.scripts]
+chatterbox = "chatterbox.cli:main"
+
+[tool.setuptools_scm]
+fallback_version = "0.1.0"
+
+[tool.setuptools.packages.find]
+where = [""]
+include = ["chatterbox*"]
+
+[tool.setuptools.package-data]
+chatterbox = ["data/*.json", "data/*.yaml"]
+
+[tool.pytest.ini_options]
+addopts = "--ignore-glob=*/version.py"
+testpaths = ["tests"]
+
+[tool.mypy]
+disallow_untyped_defs = "True"
+ignore_missing_imports = "True"
+
+[tool.black]
+line-length = 110
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 110
+
+[tool.ruff]
+exclude = ["__init__.py", "notebooks"]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "N", "W"]
+extend-select = ["RUF100"]
+ignore = [
+    "N802",
+    "N803",
+    "N806",
+    "N812",
+    "N815",
+    "N816",
+    "N999",
+    "D100",
+    "D102",
+    "D104",
+    "D105",
+    "D107",
+    "D200",
+    "D205",
+    "D400",
+    "E712",
+]
+
+[tool.ruff.lint.pycodestyle]
+max-doc-length = 79
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"

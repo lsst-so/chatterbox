@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+chatterbox/version.py
+
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local runtime state: rendered plots, template coverage caches, sim job dirs.
+work/
+templates/
+*.png
+*.jpg
+*.h5
+*.npy
+!tests/data/*.npy
+
+# Never commit secrets or local config overrides.
+.env
+config.local.yaml
+.venv/
