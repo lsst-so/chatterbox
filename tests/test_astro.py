@@ -45,6 +45,102 @@ def test_nest_to_ring_round_trip():
     assert np.array_equal(back, nested)
 
 
+def test_chatterbox_does_not_import_astropy_healpix():
+    """chatterbox's own code must not depend on astropy-healpix directly.
+
+    It is still installed, because ``ligo.skymap`` needs it transitively for
+    the sky projections and for reading GraceDB skymaps, but nothing here
+    should reach for it: `pixel_corner_decs` covers our one use of it.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "chatterbox"
+    offenders = []
+    for path in root.rglob("*.py"):
+        for n, line in enumerate(path.read_text().splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if "astropy_healpix" in stripped and ("import" in stripped):
+                offenders.append(f"{path.relative_to(root)}:{n}: {stripped}")
+    assert not offenders, "astropy_healpix imported in:\n" + "\n".join(offenders)
+
+
+def test_pixel_corner_decs_matches_astropy_healpix():
+    """Guard the replacement for ``astropy_healpix.boundaries_lonlat``.
+
+    chatterbox no longer depends on astropy-healpix, but ligo.skymap pulls
+    it in transitively, so when it is importable we check the two agree
+    exactly. This is the reference test for the swap.
+    """
+    from chatterbox.astro.skymap import pixel_corner_decs
+
+    try:
+        from astropy_healpix import boundaries_lonlat
+    except ImportError:
+        pytest.skip("astropy-healpix is not importable")
+
+    rng = np.random.default_rng(0)
+    for nside in (1, 4, 32, 256):
+        npix = hp.nside2npix(nside)
+        pixels = rng.choice(npix, size=min(npix, 100), replace=False).astype(np.int64)
+        reference = boundaries_lonlat(pixels, 1, nside, "nested")[1].to_value().ravel()
+        assert pixel_corner_decs(nside, pixels) == pytest.approx(reference, abs=1e-12)
+
+
+def test_pixel_corner_decs_golden_values():
+    """Pin the values, so the check survives astropy-healpix going away.
+
+    Taken from ``astropy_healpix.boundaries_lonlat([0], 1, 1, "nested")``,
+    the implementation this replaced.
+    """
+    from chatterbox.astro.skymap import pixel_corner_decs
+
+    # nside 1, NESTED pixel 0: a polar-cap pixel touching the north pole.
+    decs = np.sort(pixel_corner_decs(1, [0]))
+    assert decs == pytest.approx([0.0, 0.72972766, 0.72972766, np.pi / 2], abs=1e-8)
+    # Its corners reach exactly the pole and exactly the equator.
+    assert decs.max() == pytest.approx(np.pi / 2)
+    assert decs.min() == pytest.approx(0.0)
+    # The side corners sit at asin(2/3), the nside-1 polar-cap boundary.
+    assert decs[1] == pytest.approx(np.arcsin(2.0 / 3.0), abs=1e-8)
+
+
+def test_pixel_corner_decs_brackets_the_pixel_centre():
+    """Corners must straddle the centre; that is why they are used."""
+    from chatterbox.astro.skymap import pixel_corner_decs
+
+    nside = 32
+    for pixel in (0, 100, 5000, hp.nside2npix(nside) - 1):
+        _, centre_dec = hp.pix2ang(nside, pixel, nest=True, lonlat=True)
+        corners = np.degrees(pixel_corner_decs(nside, [pixel]))
+        assert corners.min() <= centre_dec <= corners.max()
+
+
+def test_pixel_corner_decs_accepts_a_scalar_and_respects_ordering():
+    from chatterbox.astro.skymap import pixel_corner_decs
+
+    scalar = pixel_corner_decs(8, 42)
+    listed = pixel_corner_decs(8, [42])
+    assert scalar.shape == (4,)
+    assert scalar == pytest.approx(listed)
+
+    # RING 42 is a different pixel from NESTED 42, so the two must differ.
+    assert not np.allclose(pixel_corner_decs(8, [42], nest=False), listed)
+    # ...and must equal the NESTED corners of the same physical pixel.
+    same = hp.ring2nest(8, 42)
+    assert pixel_corner_decs(8, [42], nest=False) == pytest.approx(pixel_corner_decs(8, [same]))
+
+
+def test_pixel_corner_decs_in_range():
+    from chatterbox.astro.skymap import pixel_corner_decs
+
+    decs = pixel_corner_decs(16, np.arange(hp.nside2npix(16)))
+    assert decs.size == hp.nside2npix(16) * 4
+    assert decs.min() >= -np.pi / 2 - 1e-12
+    assert decs.max() <= np.pi / 2 + 1e-12
+
+
 def test_credible_mask_contains_at_least_the_requested_level():
     rng = np.random.default_rng(0)
     prob = rng.random(hp.nside2npix(16)) ** 4

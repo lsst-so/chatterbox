@@ -11,6 +11,7 @@ from .skymap import (
     localization_from_probability,
     localization_from_reward_map,
     nest_to_ring,
+    pixel_corner_decs,
 )
 from .templates import TemplateCoverage, load_source_maps, load_template_maps
 
@@ -18,6 +19,7 @@ __all__ = [
     "KahanAdder",
     "Skymap",
     "nest_to_ring",
+    "pixel_corner_decs",
     "credible_mask",
     "contour_levels",
     "geometry_from_mask",

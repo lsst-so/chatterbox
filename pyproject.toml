@@ -14,7 +14,6 @@ dependencies = [
     "scipy",
     "matplotlib",
     "astropy",
-    "astropy-healpix",
     "healpy",
     "pandas",
     "pyyaml",

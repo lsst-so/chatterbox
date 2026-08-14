@@ -18,13 +18,13 @@ import math
 import healpy as hp
 import numpy as np
 from astropy.coordinates import SkyCoord
-from astropy_healpix import boundaries_lonlat
 
 from ..models import Geometry, Localization
 
 __all__ = [
     "KahanAdder",
     "Skymap",
+    "pixel_corner_decs",
     "nest_to_ring",
     "credible_mask",
     "contour_levels",
@@ -37,6 +37,44 @@ logger = logging.getLogger(__name__)
 
 #: Square degrees per steradian.
 DEG2_PER_SR = (180.0 / math.pi) ** 2
+
+
+def pixel_corner_decs(nside: int, pixels, nest: bool = True, step: int = 1) -> np.ndarray:
+    """Declinations of the corners of a set of HEALPix pixels, in radians.
+
+    Corner declinations rather than centre declinations are what the producer's
+    visibility cut is applied to, so a region's true extent is never
+    understated by half a pixel.
+
+    Parameters
+    ----------
+    nside : `int`
+        Resolution of `pixels`.
+    pixels : array-like of `int`
+        Pixel indices, all at the same `nside`.
+    nest : `bool`
+        True when `pixels` are in NESTED ordering.
+    step : `int`
+        Corners sampled per pixel side; 1 gives the four true corners.
+
+    Returns
+    -------
+    decs : `numpy.ndarray`
+        Flattened declinations in radians.
+
+    Notes
+    -----
+    This replaces ``astropy_healpix.boundaries_lonlat``, which chatterbox
+    used to depend on directly. ``healpy.boundaries`` returns unit vectors
+    rather than angles, so the declination is ``arcsin(z)``; the two agree to
+    floating-point epsilon (checked in the tests), and dropping the extra
+    dependency keeps the HEALPix work in one library.
+    """
+    indices = np.atleast_1d(np.asarray(pixels, dtype=np.int64))
+    # healpy returns (3, 4 * step) for a scalar and (n, 3, 4 * step) for an
+    # array; reshaping handles both without branching.
+    corners = np.reshape(hp.boundaries(nside, indices, step=step, nest=nest), (-1, 3, 4 * step))
+    return np.arcsin(np.clip(corners[:, 2, :], -1.0, 1.0)).ravel()
 
 
 class KahanAdder:
@@ -142,12 +180,11 @@ class Skymap:
             if summed_prob >= target_probability:
                 break
 
-        # boundaries_lonlat handles only one nside at a time, so batch by
+        # Pixel corners can only be computed one nside at a time, so batch by
         # order.
         min_dec = 100.0
         for nside, indices in n_indices.items():
-            corner_decs = boundaries_lonlat(indices, 1, nside, "nested")[1].to_value().flatten()
-            min_dec = min(min_dec, float(np.min(corner_decs)))
+            min_dec = min(min_dec, float(np.min(pixel_corner_decs(nside, indices))))
         return summed_area.sum, min_dec
 
     def make_flat_map(self) -> np.ndarray:
@@ -323,8 +360,8 @@ def geometry_from_mask(mask: np.ndarray, nside: int) -> Geometry:
     ra, dec = hp.pix2ang(nside, pixels, lonlat=True)
 
     # Corner declinations, so a region's true extent is not understated.
-    corners = hp.boundaries(nside, pixels, step=1)  # (npix, 3, 4)
-    corner_dec = np.degrees(np.arcsin(np.clip(corners[:, 2, :], -1.0, 1.0)))
+    # This mask is RING-ordered, unlike the NESTED indices in Skymap.
+    corner_dec = np.degrees(pixel_corner_decs(nside, pixels, nest=False))
     dec_min = float(corner_dec.min())
     dec_max = float(corner_dec.max())
 
