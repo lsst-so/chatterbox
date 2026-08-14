@@ -26,7 +26,6 @@ dependencies = [
 # ~/mamba/envs/scheduler_dev_env already; listed here for fresh environments.
 rubin = [
     "rubin-scheduler",
-    "rubin-nights",
     "ligo.skymap",
     "ligo-gracedb",
     "skyproj",

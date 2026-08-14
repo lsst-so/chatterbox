@@ -23,8 +23,8 @@ result of a scheduler simulation.
   by hours per pixel with airmass < 2 while the Sun is below −12°, with the
   localization drawn on top.
 - **Localization contour over existing template coverage** — one panel per LSST
-  band showing prior visit counts, with the fraction of the localization that
-  already has templates in each band.
+  band, drawn from the published binary coverage maps, with the fraction of the
+  localization that already has templates in each band.
 - **The planned follow-up**: epochs, bands, visit counts and exposure times,
   read live from `ts_fbs_utils` so it cannot drift from what the scheduler runs.
 
@@ -96,16 +96,22 @@ All commands below are shown as `python -m chatterbox.cli`, which works from the
 repository root whether or not the package is installed. Once installed, the
 `chatterbox` console script is equivalent.
 
-Build the per-band template coverage cache first. This is the one thing that
-must be done ahead of time, because it is far too slow for the alert path:
+Refresh the per-band template coverage cache first:
 
 ```bash
 python -m chatterbox.cli refresh-templates
 ```
 
-Run it nightly from cron. The cache's build time appears in every post, so
-staleness is visible rather than silent. To build from a ConsDB export instead
-of querying ConsDB, pass `--csv path/to/visits.csv`.
+Template coverage is not computed by chatterbox. It is produced upstream by the
+incremental templates tooling, which publishes one **binary** HEALPix FITS map
+per band at `templates.maps_dir` — 1 where a template exists, 0 where it does
+not — named `template_coverage_healpix_{band}_nside{nside}.fits`. This command
+reads those files and caches them locally; it queries nothing.
+
+Run it from cron so the cache tracks the published maps. The cache's timestamp
+appears in every post, so staleness is visible rather than silent, and bands
+with no published map are named explicitly rather than silently reading 0%.
+Point at a different directory with `--path`.
 
 Check everything works without posting anything — this is the main development
 loop, and it renders both plots and prints the message as text:
@@ -185,7 +191,7 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 .venv/bin/python -m pytest
 ```
 
-196 tests, no network access required. Notable checks:
+208 tests, no network access required. Notable checks:
 
 - The dark-hours map is validated against `astropy`'s full `AltAz` transform —
   an independent code path from the fast approximation used in production —
@@ -216,10 +222,12 @@ bands from Moon illumination — which silently drops requested `u`, and often
 `r` and `i`, from a ToO's scripted visits. Set `sim.band_swap_schedule` to a
 current schedule; whichever path was used is reported in the threaded reply.
 
-**Coverage geometry is approximate.** Both the template maps and the coverage
-calculation approximate LSSTCam's footprint as a 1.75° disc, ignoring the real
-focal plane and chip gaps. This matches the existing analysis notebooks and
-keeps the two consistent with each other.
+**Simulated coverage geometry is approximate.** The per-band coverage
+calculation approximates LSSTCam's footprint as a 1.75° disc around each
+simulated pointing, ignoring the real focal plane and chip gaps. This matches
+the existing analysis notebooks. Template coverage does not share this
+approximation — those maps are read from the upstream tooling as published, and
+a file that turns out not to be binary is flagged rather than reinterpreted.
 
 **An enriched skymap may disagree with the alert label.** The producer cuts on
 the skymap that was current when the alert fired; GraceDB may since have served

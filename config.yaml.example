@@ -48,18 +48,17 @@ dark_hours:
   moon_avoidance_deg: 0.0
 
 templates:
-  nside: 256
-  fov_radius_deg: 1.75
-  min_visits: 1
+  # Template coverage is produced upstream by the incremental templates tooling,
+  # which publishes one binary HEALPix FITS map per band here (1 = template
+  # exists, 0 = none). This is the only source;
+  # `chatterbox refresh-templates` reads it and queries nothing.
+  maps_dir: /home/e/ebellm/u/workspace/incremental_templates/template_tools/output
+  map_pattern: template_coverage_healpix_{band}_nside{nside}.fits
+  nside: 64
   bands: ["u", "g", "r", "i", "z", "y"]
+  # Local cache, so the alert path never reads maps_dir directly. Refresh from
+  # cron; the cache's timestamp is shown in every post.
   cache_dir: ~/.chatterbox/templates
-  # Rebuilt by `chatterbox refresh-templates`. Run it from cron so the cache
-  # stays current; its build time is shown in every post.
-  instrument: lsstcam
-  consdb_site: usdf
-  consdb_tokenfile: ~/.lsst/usdf_rsp
-  # Set to build from a ConsDB visit export instead of querying ConsDB.
-  visit_csv: ""
 
 enrich:
   # For GW alerts the `source` field is the GraceDB superevent id, so the real

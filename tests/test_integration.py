@@ -2,7 +2,6 @@
 
 import json
 
-import pandas as pd
 import pytest
 
 from chatterbox.app import process_trigger
@@ -23,16 +22,20 @@ def offline_poster(config, tmp_path):
 @pytest.fixture
 def template_cache(config):
     """A small template cache so the template panel is exercised."""
-    from chatterbox.astro.templates import build_template_maps
+    import healpy as hp
+    import numpy as np
 
-    visits = pd.DataFrame(
-        [
-            {"s_ra": 60.0, "s_dec": -35.0, "band": "i"},
-            {"s_ra": 61.0, "s_dec": -35.5, "band": "i"},
-            {"s_ra": 60.5, "s_dec": -34.5, "band": "r"},
-        ]
+    from chatterbox.astro.templates import TemplateCoverage
+
+    nside = 64
+    maps = {}
+    for band in ("r", "i"):
+        m = np.zeros(hp.nside2npix(nside))
+        m[hp.query_disc(nside, hp.ang2vec(60.0, -35.0, lonlat=True), np.radians(6.0), inclusive=True)] = 1.0
+        maps[band] = m
+    coverage = TemplateCoverage(
+        maps=maps, nside=nside, built_at="2026-08-13T00:00:00+00:00", source="integration test"
     )
-    coverage = build_template_maps(visits, nside=64, source="integration test")
     coverage.save(config.templates.cache_dir)
     return coverage
 

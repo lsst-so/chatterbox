@@ -6,10 +6,9 @@ Subcommands
     Consume the configured source and post about each record.
 ``replay``
     Handle one or more record files. ``--dry-run`` renders everything and
-    prints
-    the message without posting, which is the main development loop.
+    prints the message without posting; this is the main development loop.
 ``refresh-templates``
-    Rebuild the per-band template coverage cache from ConsDB or a visit CSV.
+    Refresh the local cache of per-band template coverage maps.
 ``simulate``
     Run the scheduler simulation for a record synchronously and print coverage.
 ``test-post``
@@ -61,14 +60,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_replay.add_argument("--out-dir", help="Where to write plots")
 
-    p_templates = sub.add_parser("refresh-templates", help="Rebuild the per-band template coverage cache")
+    p_templates = sub.add_parser(
+        "refresh-templates",
+        help="Refresh the local cache of per-band template coverage maps",
+    )
     p_templates.add_argument(
-        "--csv",
-        help="Build from a ConsDB visit export instead of querying ConsDB",
+        "--path",
+        help="Directory of coverage maps (default: templates.maps_dir)",
     )
     p_templates.add_argument("--nside", type=int, help="Override the cache resolution")
-    p_templates.add_argument("--t-start", help="Earliest visit time (ISO)")
-    p_templates.add_argument("--t-end", help="Latest visit time (ISO)")
 
     p_sim = sub.add_parser("simulate", help="Run the scheduler simulation for a record")
     p_sim.add_argument("path", help="Record file")
@@ -89,9 +89,8 @@ def _configure_logging(verbose: bool) -> None:
     #
     # Deliberately excludes "astropy": astropy installs its own Logger subclass
     # at import time and fails if a plain logger of that name already exists,
-    # so
-    # calling getLogger("astropy") here would break importing astropy at all.
-    for noisy in ("matplotlib", "urllib3", "numexpr", "PIL", "fsspec"):
+    # so calling getLogger("astropy") here would break importing astropy.
+    for noisy in ("matplotlib", "urllib3", "numexpr", "PIL", "fsspec", "healpy"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
@@ -145,41 +144,29 @@ def _cmd_replay(args: argparse.Namespace, config: Config) -> int:
 
 
 def _cmd_refresh_templates(args: argparse.Namespace, config: Config) -> int:
-    from .astro.templates import build_template_maps, fetch_visits_consdb, fetch_visits_csv
+    from .astro.templates import load_source_maps
 
     cfg = config.templates
     nside = args.nside or cfg.nside
+    maps_dir = args.path or cfg.maps_dir
 
-    if args.csv:
-        visits = fetch_visits_csv(args.csv)
-        source = f"visit export {args.csv}"
-    elif cfg.visit_csv:
-        visits = fetch_visits_csv(cfg.visit_csv)
-        source = f"visit export {cfg.visit_csv}"
-    else:
-        visits = fetch_visits_consdb(
-            instrument=cfg.instrument,
-            site=cfg.consdb_site,
-            tokenfile=cfg.consdb_tokenfile,
-            t_start=args.t_start,
-            t_end=args.t_end,
+    try:
+        coverage = load_source_maps(
+            maps_dir,
+            nside=nside,
+            bands=tuple(cfg.bands),
+            pattern=cfg.map_pattern,
         )
-        source = f"ConsDB {cfg.instrument} at {cfg.consdb_site}"
+    except FileNotFoundError as exc:
+        print(exc, file=sys.stderr)
+        return 1
 
-    coverage = build_template_maps(
-        visits,
-        nside=nside,
-        fov_radius_deg=cfg.fov_radius_deg,
-        min_visits=cfg.min_visits,
-        bands=tuple(cfg.bands),
-        source=source,
-    )
     out = coverage.save(cfg.cache_dir)
-    print(f"Wrote template coverage for {','.join(coverage.bands)} to {out}")
+    print(f"Cached template coverage for {','.join(coverage.bands)} from {maps_dir} to {out}")
     for band in coverage.bands:
-        print(
-            f"  {band}: {coverage.n_visits.get(band, 0):>7,} visits, {coverage.area_deg2(band):>9,.0f} deg^2"
-        )
+        print(f"  {band}: {coverage.area_deg2(band):>9,.0f} deg^2")
+    if coverage.missing_bands:
+        print(f"  no map published for: {', '.join(coverage.missing_bands)}")
     return 0
 
 

@@ -79,24 +79,37 @@ def test_missing_template_cache_is_called_out(rendered):
 
 
 def test_template_coverage_is_reported_when_available(record, config, rubin_scheduler):
-    import pandas as pd
+    import healpy as hp
+    import numpy as np
 
     from chatterbox.astro.almanac import night_events
     from chatterbox.astro.darkhours import dark_hours_map
-    from chatterbox.astro.templates import build_template_maps
+    from chatterbox.astro.templates import TemplateCoverage
     from chatterbox.plots.darkhours import region_hours_summary
 
     trigger = decode_record(record)
     events = night_events(when=trigger.event_time)
     dark = dark_hours_map(events, nside=32, step_minutes=10.0)
     stats = region_hours_summary(dark, trigger.localization)
-    coverage = build_template_maps(
-        pd.DataFrame([{"s_ra": 60.0, "s_dec": -35.0, "band": "i"}]), nside=64, source="test"
+
+    nside = 64
+    covered = np.zeros(hp.nside2npix(nside))
+    covered[hp.query_disc(nside, hp.ang2vec(60.0, -35.0, lonlat=True), np.radians(6.0), inclusive=True)] = 1.0
+    coverage = TemplateCoverage(
+        maps={"i": covered},
+        nside=nside,
+        built_at="2026-08-13T00:00:00+00:00",
+        source="/published/maps",
     )
+
     blocks = build_trigger_blocks(trigger, events, dark, stats, coverage, config)
     text = block_text(blocks)
     assert "Existing template coverage" in text
-    assert "Cache built" in text
+    assert "Cache refreshed" in text
+    assert "/published/maps" in text
+    # Bands with no published map must be called out rather than silently zero.
+    assert "No coverage map published for" in text
+    assert "u" in text
 
 
 def test_test_alerts_are_marked(data_dir, config, rubin_scheduler):

@@ -1,21 +1,18 @@
 """Per-band LSST template coverage as HEALPix maps.
 
-Coverage is expressed as one visit-count map per band, following the recipe
-used in ``plotMaker``: paint a disc of the LSSTCam field-of-view radius around
-each visit boresight and accumulate. A pixel is considered to have a template
-once it reaches ``min_visits``.
+Coverage is not computed here. It is produced upstream by the incremental
+templates tooling, which writes one HEALPix FITS map per band at a known path,
+named by `DEFAULT_MAP_PATTERN`. chatterbox reads those files and nothing else.
 
-Maps are built offline by ``chatterbox refresh-templates`` and cached on disk,
-so the alert path only ever loads them. That keeps a ConsDB query off the
-low-latency path, and the cache's build time is reported in Slack so staleness
-is visible rather than silent.
+``chatterbox refresh-templates`` copies them into a local cache so the alert
+path never touches the shared filesystem the originals live on, and the cache's
+build time is reported in Slack so staleness is visible rather than silent.
 
 Notes
 -----
-The disc approximation ignores the real focal-plane geometry and chip gaps, so
-it slightly overestimates coverage near field edges. It is what the existing
-analysis notebooks use, and it keeps the template map and the localization on
-the same footing.
+The maps are binary: 1 where a template exists, 0 where it does not. Anything
+non-zero is treated as covered, and `load_source_maps` warns if a file turns
+out to hold something else, since that would mean the upstream format changed.
 """
 
 import json
@@ -25,15 +22,15 @@ from pathlib import Path
 
 import healpy as hp
 import numpy as np
-import pandas as pd
 
 __all__ = [
     "TemplateCoverage",
-    "build_template_maps",
     "load_template_maps",
-    "fetch_visits_consdb",
-    "fetch_visits_csv",
+    "load_source_maps",
+    "read_coverage_map",
+    "map_filename",
     "BANDS",
+    "DEFAULT_MAP_PATTERN",
 ]
 
 logger = logging.getLogger(__name__)
@@ -41,47 +38,74 @@ logger = logging.getLogger(__name__)
 #: LSST bands in canonical order.
 BANDS = ("u", "g", "r", "i", "z", "y")
 
+#: Filename convention used by the incremental templates tooling, e.g.
+#: ``template_coverage_healpix_y_nside64.fits``.
+DEFAULT_MAP_PATTERN = "template_coverage_healpix_{band}_nside{nside}.fits"
+
 _META_NAME = "meta.json"
+
+
+def map_filename(band: str, nside: int, pattern: str = DEFAULT_MAP_PATTERN) -> str:
+    """Filename of the coverage map for one band.
+
+    Parameters
+    ----------
+    band : `str`
+        Single-character band name.
+    nside : `int`
+        Map resolution, which appears in the filename.
+    pattern : `str`
+        Format string with ``{band}`` and ``{nside}`` fields.
+
+    Returns
+    -------
+    name : `str`
+    """
+    return pattern.format(band=band, nside=nside)
 
 
 @dataclass
 class TemplateCoverage:
-    """Per-band visit-count maps in RING ordering.
+    """Per-band template coverage maps in RING ordering.
 
     Attributes
     ----------
     maps : `dict` [`str`, `numpy.ndarray`]
-        Visit counts per pixel, keyed by single-character band name.
+        Coverage value per pixel, keyed by single-character band name.
     nside : `int`
         Map resolution.
-    min_visits : `int`
-        Visits required for a pixel to count as having a template.
     built_at : `str`
-        ISO-8601 UTC timestamp of when the maps were built.
+        ISO-8601 UTC timestamp of when the cache was refreshed.
     source : `str`
-        Where the visits came from, shown in Slack.
-    n_visits : `dict` [`str`, `int`]
-        Number of visits that went into each band's map.
-    fov_radius_deg : `float`
-        Field-of-view radius used when painting visits.
+        Where the maps came from, shown in Slack.
+    band_files : `dict` [`str`, `str`]
+        The source file each band was read from.
     """
 
     maps: dict[str, np.ndarray]
     nside: int
-    min_visits: int = 1
     built_at: str = ""
     source: str = ""
-    n_visits: dict[str, int] = field(default_factory=dict)
-    fov_radius_deg: float = 1.75
+    band_files: dict[str, str] = field(default_factory=dict)
 
     @property
     def bands(self) -> list[str]:
-        """Bands present in the cache, in canonical order."""
+        """Bands present, in canonical order."""
         return [b for b in BANDS if b in self.maps]
 
+    @property
+    def missing_bands(self) -> list[str]:
+        """Bands with no coverage map available."""
+        return [b for b in BANDS if b not in self.maps]
+
     def mask(self, band: str) -> np.ndarray:
-        """Boolean map of pixels with a template in a band."""
-        return self.maps[band] >= self.min_visits
+        """Boolean map of pixels with a template in a band.
+
+        The published maps are binary, so any non-zero value means covered.
+        This also makes NaN (were it ever used for "no data") read as
+        uncovered rather than raising.
+        """
+        return np.asarray(self.maps[band]) > 0
 
     def area_deg2(self, band: str) -> float:
         """Total sky area with a template in a band."""
@@ -101,7 +125,7 @@ class TemplateCoverage:
         Returns
         -------
         fractions : `dict` [`str`, `float`]
-            Fraction in 0-1 per band. Bands absent from the cache report 0.
+            Fraction in 0-1 per band. Bands with no map report 0.
         """
         prob_map = np.asarray(prob_map, dtype=float)
         in_nside = nside if nside is not None else hp.get_nside(prob_map)
@@ -120,18 +144,16 @@ class TemplateCoverage:
     # ------------------------------------------------------------------ I/O
 
     def save(self, cache_dir: str | Path) -> Path:
-        """Write the maps and metadata to a cache directory."""
+        """Write the maps and metadata to a local cache directory."""
         out = Path(cache_dir).expanduser()
         out.mkdir(parents=True, exist_ok=True)
         for band, m in self.maps.items():
-            np.save(out / f"{band}.npy", m.astype(np.int32))
+            np.save(out / f"{band}.npy", np.asarray(m, dtype=np.float32))
         meta = {
             "nside": self.nside,
-            "min_visits": self.min_visits,
             "built_at": self.built_at,
             "source": self.source,
-            "n_visits": self.n_visits,
-            "fov_radius_deg": self.fov_radius_deg,
+            "band_files": self.band_files,
             "bands": self.bands,
         }
         (out / _META_NAME).write_text(json.dumps(meta, indent=2))
@@ -139,8 +161,128 @@ class TemplateCoverage:
         return out
 
 
+def read_coverage_map(path: str | Path) -> np.ndarray:
+    """Read one band's HEALPix coverage map as a RING-ordered array.
+
+    Parameters
+    ----------
+    path : `str` or `pathlib.Path`
+        FITS file written by the incremental templates tooling.
+
+    Returns
+    -------
+    coverage : `numpy.ndarray`
+        RING ordering. ``healpy`` converts from NESTED when the file's
+        ``ORDERING`` keyword says so, so either is accepted.
+    """
+    # nest=False asks healpy for RING output regardless of how the file is
+    # stored; dtype=None preserves whatever the tooling wrote.
+    return np.asarray(hp.read_map(str(path), nest=False, dtype=None))
+
+
+def load_source_maps(
+    maps_dir: str | Path,
+    nside: int,
+    bands: tuple[str, ...] = BANDS,
+    pattern: str = DEFAULT_MAP_PATTERN,
+) -> TemplateCoverage:
+    """Read the per-band coverage maps from the directory they land in.
+
+    Parameters
+    ----------
+    maps_dir : `str` or `pathlib.Path`
+        Directory holding one FITS map per band.
+    nside : `int`
+        Resolution, used both to build the filenames and to validate the maps.
+    bands : `tuple` [`str`]
+        Bands to look for.
+    pattern : `str`
+        Filename pattern with ``{band}`` and ``{nside}`` fields.
+
+    Returns
+    -------
+    coverage : `TemplateCoverage`
+
+    Raises
+    ------
+    FileNotFoundError
+        If the directory does not exist, or no band's map could be read.
+        A missing *individual* band is logged and skipped, since coverage
+        is built up band by band upstream.
+    """
+    directory = Path(maps_dir).expanduser()
+    if not directory.is_dir():
+        raise FileNotFoundError(
+            f"Template coverage directory not found: {directory}. Set "
+            "templates.maps_dir to the directory the coverage maps are published to."
+        )
+
+    maps: dict[str, np.ndarray] = {}
+    band_files: dict[str, str] = {}
+    expected_npix = hp.nside2npix(nside)
+
+    for band in bands:
+        path = directory / map_filename(band, nside, pattern)
+        if not path.is_file():
+            logger.warning("No %s-band coverage map at %s", band, path)
+            continue
+        try:
+            coverage = read_coverage_map(path)
+        except Exception as exc:
+            logger.error("Could not read %s: %s", path, exc)
+            continue
+        if coverage.size != expected_npix:
+            logger.error(
+                "%s has %d pixels, expected %d for nside=%d; skipping",
+                path,
+                coverage.size,
+                expected_npix,
+                nside,
+            )
+            continue
+        # The maps are meant to be binary. Anything else still works, since
+        # non-zero counts as covered, but it means the upstream format
+        # changed -- worth saying out loud rather than silently reinterpreting.
+        distinct = np.unique(coverage[np.isfinite(coverage)])
+        if not np.all(np.isin(distinct, (0, 1))):
+            logger.warning(
+                "%s is not binary (values %s...); treating any non-zero pixel as covered",
+                path.name,
+                np.array2string(distinct[:5], precision=3),
+            )
+
+        maps[band] = coverage
+        band_files[band] = str(path)
+        logger.info(
+            "Read %s-band coverage from %s (%.0f deg^2 covered)",
+            band,
+            path.name,
+            (coverage > 0).sum() * hp.nside2pixarea(nside, degrees=True),
+        )
+
+    if not maps:
+        raise FileNotFoundError(
+            f"No template coverage maps found in {directory} matching "
+            f"{pattern.format(band='<band>', nside=nside)}"
+        )
+
+    from datetime import datetime, timezone
+
+    missing = [b for b in bands if b not in maps]
+    if missing:
+        logger.warning("No coverage map for band(s): %s", ", ".join(missing))
+
+    return TemplateCoverage(
+        maps=maps,
+        nside=nside,
+        built_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        source=str(directory),
+        band_files=band_files,
+    )
+
+
 def load_template_maps(cache_dir: str | Path) -> TemplateCoverage | None:
-    """Load cached per-band template maps.
+    """Load the local cache written by ``chatterbox refresh-templates``.
 
     Returns
     -------
@@ -166,164 +308,10 @@ def load_template_maps(cache_dir: str | Path) -> TemplateCoverage | None:
         return TemplateCoverage(
             maps=maps,
             nside=int(meta["nside"]),
-            min_visits=int(meta.get("min_visits", 1)),
             built_at=meta.get("built_at", ""),
             source=meta.get("source", ""),
-            n_visits=meta.get("n_visits", {}),
-            fov_radius_deg=float(meta.get("fov_radius_deg", 1.75)),
+            band_files=meta.get("band_files", {}),
         )
     except Exception as exc:
         logger.warning("Could not read template cache at %s: %s", path, exc)
         return None
-
-
-# ------------------------------------------------------------------ building
-
-
-def build_template_maps(
-    visits: pd.DataFrame,
-    nside: int = 256,
-    fov_radius_deg: float = 1.75,
-    min_visits: int = 1,
-    bands: tuple[str, ...] = BANDS,
-    ra_col: str = "s_ra",
-    dec_col: str = "s_dec",
-    band_col: str = "band",
-    source: str = "",
-) -> TemplateCoverage:
-    """Accumulate per-band visit-count maps from a visit table.
-
-    Parameters
-    ----------
-    visits : `pandas.DataFrame`
-        One row per visit, with boresight RA/Dec in **degrees** and a band.
-    nside : `int`
-        Output resolution.
-    fov_radius_deg : `float`
-        Radius of the disc painted around each boresight.
-    min_visits : `int`
-        Stored on the result; visits required for a template to exist.
-    bands : `tuple` [`str`]
-        Bands to build.
-    ra_col, dec_col, band_col : `str`
-        Column names. Defaults match a ConsDB visit export.
-    source : `str`
-        Description recorded in the cache metadata.
-
-    Returns
-    -------
-    coverage : `TemplateCoverage`
-    """
-    from datetime import datetime, timezone
-
-    missing = [c for c in (ra_col, dec_col, band_col) if c not in visits.columns]
-    if missing:
-        raise KeyError(f"Visit table is missing columns {missing}; have {list(visits.columns)}")
-
-    npix = hp.nside2npix(nside)
-    radius = np.radians(fov_radius_deg)
-    maps: dict[str, np.ndarray] = {}
-    counts: dict[str, int] = {}
-
-    for band in bands:
-        rows = visits[visits[band_col] == band]
-        nvis_map = np.zeros(npix, dtype=np.int32)
-        ra = np.asarray(rows[ra_col], dtype=float)
-        dec = np.asarray(rows[dec_col], dtype=float)
-        good = np.isfinite(ra) & np.isfinite(dec)
-        if good.sum() != ra.size:
-            logger.warning("Dropping %d %s-band visits with non-finite pointings", ra.size - good.sum(), band)
-        ra, dec = ra[good], dec[good]
-        if ra.size:
-            vecs = hp.ang2vec(ra, dec, lonlat=True)
-            for vec in vecs:
-                nvis_map[hp.query_disc(nside, vec, radius, inclusive=True)] += 1
-        maps[band] = nvis_map
-        counts[band] = int(ra.size)
-        logger.info(
-            "Band %s: %d visits -> %.0f deg^2 with >=%d visits",
-            band,
-            ra.size,
-            (nvis_map >= min_visits).sum() * hp.nside2pixarea(nside, degrees=True),
-            min_visits,
-        )
-
-    return TemplateCoverage(
-        maps=maps,
-        nside=nside,
-        min_visits=min_visits,
-        built_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        source=source,
-        n_visits=counts,
-        fov_radius_deg=fov_radius_deg,
-    )
-
-
-def fetch_visits_csv(path: str | Path) -> pd.DataFrame:
-    """Read a visit table exported from ConsDB as CSV or ECSV.
-
-    Parameters
-    ----------
-    path : `str` or `pathlib.Path`
-        File to read. ``.ecsv`` is read through astropy.
-
-    Returns
-    -------
-    visits : `pandas.DataFrame`
-    """
-    path = Path(path).expanduser()
-    if path.suffix == ".ecsv":
-        from astropy.table import Table
-
-        return Table.read(path).to_pandas()
-    return pd.read_csv(path)
-
-
-def fetch_visits_consdb(
-    instrument: str = "lsstcam",
-    site: str = "usdf",
-    tokenfile: str = "~/.lsst/usdf_rsp",
-    t_start: str | None = None,
-    t_end: str | None = None,
-) -> pd.DataFrame:
-    """Query ConsDB for the visit history, via ``rubin_nights``.
-
-    Parameters
-    ----------
-    instrument : `str`
-        ConsDB instrument name.
-    site : `str`
-        One of the endpoints known to ``rubin_nights`` (``usdf``, ``summit``).
-    tokenfile : `str`
-        Path to the RSP token file.
-    t_start, t_end : `str`, optional
-        ISO times bounding the query. Defaults to the full history.
-
-    Returns
-    -------
-    visits : `pandas.DataFrame`
-        With at least ``band``, ``s_ra`` and ``s_dec`` columns.
-    """
-    from astropy.time import Time
-    from rubin_nights import connections
-    from rubin_nights.consdb_query import ConsDbFastAPI, ConsDbTap
-
-    tokenfile = str(Path(tokenfile).expanduser())
-    endpoints = connections.get_clients(tokenfile=tokenfile, site=site)
-
-    start = Time(t_start) if t_start else None
-    end = Time(t_end) if t_end else None
-
-    consdb = endpoints.get("consdb")
-    if consdb is None:
-        # get_clients did not supply one; fall back to constructing directly.
-        base = connections.api_endpoints.get(site)
-        token = Path(tokenfile).read_text().strip()
-        try:
-            consdb = ConsDbTap(api_base=base, token=token)
-        except Exception:
-            consdb = ConsDbFastAPI(api_base=base, token=token)
-
-    visits = consdb.get_visits(instrument=instrument, t_start=start, t_end=end)
-    logger.info("ConsDB returned %d visits for %s", len(visits), instrument)
-    return visits

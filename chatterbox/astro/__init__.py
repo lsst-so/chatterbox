@@ -12,7 +12,7 @@ from .skymap import (
     localization_from_reward_map,
     nest_to_ring,
 )
-from .templates import TemplateCoverage, build_template_maps, load_template_maps
+from .templates import TemplateCoverage, load_source_maps, load_template_maps
 
 __all__ = [
     "KahanAdder",
@@ -30,5 +30,5 @@ __all__ = [
     "dark_hours_map",
     "TemplateCoverage",
     "load_template_maps",
-    "build_template_maps",
+    "load_source_maps",
 ]

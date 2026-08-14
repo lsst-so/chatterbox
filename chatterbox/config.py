@@ -110,21 +110,19 @@ class DarkHoursConfig:
 class TemplateConfig:
     """Per-band LSST template coverage maps."""
 
-    nside: int = 256
-    #: LSSTCam field-of-view radius used to paint each visit onto the map.
-    fov_radius_deg: float = 1.75
-    #: A pixel counts as having a template once it has at least this many
-    #: visits.
-    min_visits: int = 1
+    #: Directory the incremental templates tooling publishes its per-band
+    #: HEALPix coverage maps to. This is the only source of template coverage;
+    #: ``refresh-templates`` reads it and queries nothing.
+    maps_dir: str = "/home/e/ebellm/u/workspace/incremental_templates/template_tools/output"
+    #: Filename convention within `maps_dir`, e.g.
+    #: ``template_coverage_healpix_y_nside64.fits``.
+    map_pattern: str = "template_coverage_healpix_{band}_nside{nside}.fits"
+    #: Resolution of the published maps; also appears in their filenames.
+    nside: int = 64
     bands: list[str] = field(default_factory=lambda: ["u", "g", "r", "i", "z", "y"])
-    #: Directory holding the cached ``{band}.npy`` maps plus ``meta.json``.
+    #: Local cache of ``{band}.npy`` maps plus ``meta.json``, so the alert path
+    #: never reads from `maps_dir` directly.
     cache_dir: str = "~/.chatterbox/templates"
-    #: ConsDB instrument and site used by ``chatterbox refresh-templates``.
-    instrument: str = "lsstcam"
-    consdb_site: str = "usdf"
-    consdb_tokenfile: str = "~/.lsst/usdf_rsp"
-    #: Fallback visit CSV (as exported from ConsDB) when no token is available.
-    visit_csv: str = ""
 
 
 @dataclass

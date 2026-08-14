@@ -302,12 +302,13 @@ def _template_blocks(
     quantity = trigger.localization.quantity_name
     per_band = "  |  ".join(f"{band} {fractions[band]:.0%}" for band in ("u", "g", "r", "i", "z", "y"))
     lines = [
-        f"*Existing template coverage* (fraction of localization {quantity} with >= "
-        f"{coverage.min_visits} prior visit)",
+        f"*Existing template coverage* (fraction of localization {quantity} with a template)",
         per_band,
     ]
+    if coverage.missing_bands:
+        lines.append(f"_No coverage map published for: {', '.join(coverage.missing_bands)}._")
     if coverage.built_at:
-        lines.append(f"_Cache built {coverage.built_at} from {coverage.source or 'unknown source'}._")
+        lines.append(f"_Cache refreshed {coverage.built_at} from {coverage.source or 'unknown source'}._")
     return [_section("\n".join(lines))]
 
 
