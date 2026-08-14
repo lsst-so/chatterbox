@@ -153,8 +153,20 @@ class SimConfig:
     ts_config_scheduler: str = "~/Desktop/Repos/ts_config_scheduler"
     #: Must be the tree containing ``sim_baseline``.
     rubin_sim_data: str = "~/RubinUtils/rubin_sim_data"
-    #: Pre-staged visit history required by ``setup_scheduler``.
-    opsim_h5: str = "~/Desktop/Repos/lsst_survey_sim/notebooks2/opsim.h5"
+
+    #: Cached visit history the simulation starts from. It is fetched from
+    #: ConsDB with ``lsst_survey_sim.fetch_previous_visits`` and refreshed
+    #: automatically, so there is nothing to stage by hand.
+    opsim_cache: str = "~/.chatterbox/work/opsim.parquet"
+    #: Refresh the cache when it is older than this. 24 h means a ToO arriving
+    #: on a night whose cache was not refreshed by cron refreshes it itself.
+    #: ``0`` fetches fresh visits for every simulation.
+    opsim_max_age_hours: float = 24.0
+    #: RSP token for ConsDB. Empty uses the ``ACCESS_TOKEN`` environment
+    #: variable, which is what ``fetch_previous_visits`` falls back to.
+    opsim_tokenfile: str = "~/.lsst/usdf_rsp"
+    #: ConsDB site; must match where the token came from.
+    opsim_site: str = "usdf"
     #: Override the per-alert-class night count. ``0`` uses the class default.
     nights_override: int = 0
     #: Hard wall-clock cap on a simulation job.

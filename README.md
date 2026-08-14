@@ -96,10 +96,14 @@ All commands below are shown as `python -m chatterbox.cli`, which works from the
 repository root whether or not the package is installed. Once installed, the
 `chatterbox` console script is equivalent.
 
-Refresh the per-band template coverage cache first:
+Refresh the two caches the bot reads from. Both are cron jobs:
 
 ```bash
 python -m chatterbox.cli refresh-templates
+```
+
+```bash
+python -m chatterbox.cli refresh-opsim
 ```
 
 Template coverage is not computed by chatterbox. It is produced upstream by the
@@ -112,6 +116,14 @@ Run it from cron so the cache tracks the published maps. The cache's timestamp
 appears in every post, so staleness is visible rather than silent, and bands
 with no published map are named explicitly rather than silently reading 0%.
 Point at a different directory with `--path`.
+
+`refresh-opsim` caches the visit history the simulation starts from, fetched
+from ConsDB with `lsst_survey_sim`'s own `fetch_previous_visits`. There is no
+opsim file to stage by hand: the cache refreshes when it is older than
+`sim.opsim_max_age_hours` (24 h by default), or when it predates the night being
+simulated — so a ToO arriving on a night cron has not covered refreshes it
+itself before simulating. If ConsDB is unreachable and a cache exists, the
+simulation uses it and says so in the threaded reply rather than failing.
 
 Check everything works without posting anything — this is the main development
 loop, and it renders both plots and prints the message as text:
@@ -191,7 +203,7 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 .venv/bin/python -m pytest
 ```
 
-208 tests, no network access required. Notable checks:
+229 tests, no network access required. Notable checks:
 
 - The dark-hours map is validated against `astropy`'s full `AltAz` transform —
   an independent code path from the fast approximation used in production —

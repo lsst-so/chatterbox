@@ -80,8 +80,16 @@ sim:
   ts_config_scheduler: ~/Rubin-Observatory/ts_config_scheduler
   # Must be the tree containing sim_baseline.
   rubin_sim_data: /sdf/group/rubin/shared/rubin_sim_data/ 
-  # Pre-fetched visit history; see rubin_nights/scripts/make_opsim.py.
-  opsim_h5: ~/Desktop/Repos/lsst_survey_sim/notebooks2/opsim.h5
+  # The visit history the simulation starts from. It is fetched from ConsDB
+  # with lsst_survey_sim's own fetch_previous_visits and cached here, so there
+  # is nothing to stage by hand. It refreshes when the cache is older than
+  # opsim_max_age_hours, or when it predates the night being simulated -- so a
+  # ToO arriving on a night cron has not covered refreshes it itself.
+  # Run `chatterbox refresh-opsim` from cron to keep it warm.
+  opsim_cache: ~/.chatterbox/work/opsim.parquet
+  opsim_max_age_hours: 24.0     # 0 fetches fresh visits for every simulation
+  opsim_tokenfile: ~/.lsst/usdf_rsp   # empty uses the ACCESS_TOKEN env var
+  opsim_site: usdf
   # 0 uses the per-alert-class default (GW 20, BBH 50, neutrino 30, SNe/SSO 5).
   nights_override: 0
   timeout_s: 7200.0

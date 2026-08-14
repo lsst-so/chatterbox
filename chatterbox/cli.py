@@ -9,6 +9,8 @@ Subcommands
     prints the message without posting; this is the main development loop.
 ``refresh-templates``
     Refresh the local cache of per-band template coverage maps.
+``refresh-opsim``
+    Refresh the cached visit history the simulation starts from.
 ``simulate``
     Run the scheduler simulation for a record synchronously and print coverage.
 ``test-post``
@@ -69,6 +71,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory of coverage maps (default: templates.maps_dir)",
     )
     p_templates.add_argument("--nside", type=int, help="Override the cache resolution")
+
+    p_opsim = sub.add_parser(
+        "refresh-opsim",
+        help="Refresh the cached visit history the simulation starts from",
+    )
+    p_opsim.add_argument("--force", action="store_true", help="Refresh even if the cache is current")
+    p_opsim.add_argument(
+        "--day-obs",
+        type=int,
+        help="Fetch visits before this day_obs (default: tomorrow, i.e. everything so far)",
+    )
 
     p_sim = sub.add_parser("simulate", help="Run the scheduler simulation for a record")
     p_sim.add_argument("path", help="Record file")
@@ -170,6 +183,28 @@ def _cmd_refresh_templates(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
+def _cmd_refresh_opsim(args: argparse.Namespace, config: Config) -> int:
+    from .sim.opsim import default_day_obs, ensure_opsim
+
+    cfg = config.sim
+    day_obs = args.day_obs or default_day_obs()
+    try:
+        _, cache = ensure_opsim(
+            cfg.opsim_cache,
+            day_obs=day_obs,
+            tokenfile=cfg.opsim_tokenfile or None,
+            site=cfg.opsim_site,
+            max_age_hours=cfg.opsim_max_age_hours,
+            force=args.force,
+        )
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
+    print(f"Visit history at {cache.path}: {cache.describe()}")
+    return 1 if cache.stale_reason else 0
+
+
 def _cmd_simulate(args: argparse.Namespace, config: Config) -> int:
     from .ingest.decode import load_record_file
     from .ingest.enrich_gracedb import enrich_gravitational_wave
@@ -247,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
         "serve": _cmd_serve,
         "replay": _cmd_replay,
         "refresh-templates": _cmd_refresh_templates,
+        "refresh-opsim": _cmd_refresh_opsim,
         "simulate": _cmd_simulate,
         "test-post": _cmd_test_post,
     }

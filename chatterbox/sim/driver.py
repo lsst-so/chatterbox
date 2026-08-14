@@ -116,6 +116,7 @@ def run_job(job_dir: Path) -> dict[str, Any]:
 
     from ..astro.skymap import localization_from_probability, localization_from_reward_map
     from .coverage import band_coverage_by_epoch, coverage_curve, too_visits
+    from .opsim import ensure_opsim
 
     # ---------------------------------------------------------------- inputs
 
@@ -176,14 +177,20 @@ def run_job(job_dir: Path) -> dict[str, Any]:
             result["error"] = f"scheduler config not found: {path}"
             return result
 
-    opsim_path = Path(sim_cfg["opsim_h5"]).expanduser()
-    if not opsim_path.is_file():
-        result["error"] = (
-            f"visit history not found: {opsim_path}. Set sim.opsim_h5 to a pre-fetched "
-            "opsim.h5 (see rubin_nights/scripts/make_opsim.py)."
+    # The visit history is fetched from ConsDB and cached, so a ToO arriving on
+    # a night whose cache was not refreshed by cron refreshes it here.
+    try:
+        initial_opsim, opsim_cache = ensure_opsim(
+            sim_cfg["opsim_cache"],
+            day_obs=day_obs,
+            tokenfile=sim_cfg.get("opsim_tokenfile") or None,
+            site=sim_cfg.get("opsim_site", "usdf"),
+            max_age_hours=float(sim_cfg.get("opsim_max_age_hours", 24.0)),
         )
+    except RuntimeError as exc:
+        result["error"] = str(exc)
         return result
-    initial_opsim = pd.read_hdf(opsim_path)
+    result["opsim"] = opsim_cache.describe()
     if "day_obs" in initial_opsim.columns:
         initial_opsim = initial_opsim.query("day_obs < @day_obs")
 

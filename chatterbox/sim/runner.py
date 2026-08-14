@@ -102,6 +102,9 @@ class SimResult:
     curve_plot: str | None = None
     #: Which band carousel the simulation used; see the note in the driver.
     band_scheduler: str = ""
+    #: Provenance of the visit history the simulation started from, including
+    #: whether a stale cache had to be reused.
+    opsim: str = ""
     runtime_s: float = 0.0
     error: str | None = None
 

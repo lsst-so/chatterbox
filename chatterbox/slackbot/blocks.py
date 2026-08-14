@@ -453,6 +453,8 @@ def build_sim_reply_blocks(result: SimResult, config: Config) -> list[dict[str, 
         blocks.append(_section("*Per epoch*\n" + "\n".join(epoch_lines)))
 
     notes = []
+    if result.opsim:
+        notes.append(f"Visit history: {result.opsim}")
     if result.band_scheduler:
         notes.append(f"Filter carousel: {result.band_scheduler}")
     if config.sim.artifact_base_url and result.visits_path:

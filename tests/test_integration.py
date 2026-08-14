@@ -175,7 +175,7 @@ def test_sim_job_spec_is_self_describing(record, config, tmp_path):
     assert spec["reward_map_nside"] == trigger.reward_map_nside
     assert spec["event_mjd"] == pytest.approx(trigger.event_time.mjd)
     # Paths the driver needs must be present rather than hardcoded there.
-    for key in ("lsst_survey_sim", "ts_config_scheduler", "opsim_h5", "rubin_sim_data"):
+    for key in ("lsst_survey_sim", "ts_config_scheduler", "opsim_cache", "rubin_sim_data"):
         assert spec["sim"][key]
     assert (job_dir / "reward_map.npy").is_file()
 
