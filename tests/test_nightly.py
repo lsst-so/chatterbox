@@ -12,7 +12,7 @@ from chatterbox.astro.skymap import localization_from_probability, localization_
 from chatterbox.plots.style import localization_extent, localization_levels, sky_projection
 from chatterbox.sim.coverage import nightly_visit_maps, visits_overlapping
 from chatterbox.sim.runner import SimResult
-from chatterbox.slackbot.blocks import build_nightly_visits_blocks
+from chatterbox.slackbot.blocks import build_sim_figures_blocks
 from chatterbox.slackbot.client import PostedMessage, render_blocks_as_text
 
 NSIDE = 128
@@ -289,6 +289,7 @@ def sim_result(**overrides):
         too_visits=1972,
         job_dir="/sdf/home/s/seanmacb/.chatterbox/work/sim/S251112cm_20260814T173913",
         visits_path="/sdf/home/s/seanmacb/.chatterbox/work/sim/S251112cm_20260814T173913/visits.db",
+        curve_plot="/sdf/home/s/seanmacb/.chatterbox/work/sim/S251112cm_20260814T173913/coverage.png",
         nightly_plots=["/tmp/a.png", "/tmp/b.png"],
         nightly_plot_nights=[11, 12],
         nights_with_overlap=20,
@@ -301,20 +302,20 @@ def sim_result(**overrides):
 
 def test_message_names_the_run_directory(config):
     """The whole point of the text: where the simulation ran."""
-    text = render_blocks_as_text(build_nightly_visits_blocks(sim_result(), config))
+    text = render_blocks_as_text(build_sim_figures_blocks(sim_result(), config))
     assert "/sdf/home/s/seanmacb/.chatterbox/work/sim/S251112cm_20260814T173913" in text
     assert "Simulation run in" in text
     assert "visits.db" in text
 
 
 def test_message_states_the_selection_rule(config):
-    text = render_blocks_as_text(build_nightly_visits_blocks(sim_result(), config))
+    text = render_blocks_as_text(build_sim_figures_blocks(sim_result(), config))
     assert "overlap the localization contour" in text
     assert "Nights shown: 11, 12" in text
 
 
 def test_message_distinguishes_too_from_nominal_cadence(config):
-    text = render_blocks_as_text(build_nightly_visits_blocks(sim_result(), config))
+    text = render_blocks_as_text(build_sim_figures_blocks(sim_result(), config))
     assert "2,356 visits touch the localization" in text
     assert "1,804 ToO follow-up" in text
     assert "552 from the nominal cadence" in text
@@ -328,7 +329,7 @@ def test_message_splits_within_the_overlapping_set(config):
     3-night run where every visit is follow-up reported 1,134 of 1,108.
     """
     result = sim_result(total_visits=1134, too_visits=1134, overlap_visits=1108, overlap_too_visits=1108)
-    text = render_blocks_as_text(build_nightly_visits_blocks(result, config))
+    text = render_blocks_as_text(build_sim_figures_blocks(result, config))
     assert "1,108 visits touch the localization" in text
     assert "1,108 ToO follow-up" in text
     assert "0 from the nominal cadence" in text
@@ -336,18 +337,18 @@ def test_message_splits_within_the_overlapping_set(config):
 
 
 def test_message_admits_when_it_capped(config):
-    text = render_blocks_as_text(build_nightly_visits_blocks(sim_result(), config))
+    text = render_blocks_as_text(build_sim_figures_blocks(sim_result(), config))
     assert "Showing the first 2 of 20 nights" in text
 
 
 def test_message_omits_the_cap_note_when_nothing_was_dropped(config):
     result = sim_result(nights_with_overlap=2)
-    text = render_blocks_as_text(build_nightly_visits_blocks(result, config))
+    text = render_blocks_as_text(build_sim_figures_blocks(result, config))
     assert "Showing the first" not in text
 
 
 def test_message_blocks_are_valid(config):
-    blocks = build_nightly_visits_blocks(sim_result(), config)
+    blocks = build_sim_figures_blocks(sim_result(), config)
     json.dumps(blocks)
     assert len(blocks) <= 50
     for block in blocks:
@@ -359,20 +360,20 @@ def test_message_blocks_are_valid(config):
 
 
 def test_message_survives_a_missing_job_dir(config):
-    text = render_blocks_as_text(build_nightly_visits_blocks(sim_result(job_dir=""), config))
+    text = render_blocks_as_text(build_sim_figures_blocks(sim_result(job_dir=""), config))
     assert "unknown" in text
 
 
 def test_artifact_url_is_used_when_configured(config):
     config.sim.artifact_base_url = "https://usdf.example/chatterbox"
-    text = render_blocks_as_text(build_nightly_visits_blocks(sim_result(), config))
+    text = render_blocks_as_text(build_sim_figures_blocks(sim_result(), config))
     assert "https://usdf.example/chatterbox/S251112cm_20260814T173913" in text
 
 
 # ------------------------------------------------------------------- posting
 
 
-def test_nightly_plots_start_their_own_thread(config, tmp_path):
+def test_figures_start_their_own_thread(config, tmp_path):
     """Not replies: a 20-night run would swamp the alert's own thread."""
     from chatterbox.slackbot.client import SlackPoster
 
@@ -383,13 +384,44 @@ def test_nightly_plots_start_their_own_thread(config, tmp_path):
         path.write_bytes(b"x")
         plots.append(str(path))
 
-    blocks = build_nightly_visits_blocks(sim_result(nightly_plots=plots), config)
-    poster.post(blocks, "nightly", files=plots, label="S1_nightly")
+    blocks = build_sim_figures_blocks(sim_result(nightly_plots=plots), config)
+    poster.post(blocks, "nightly", files=plots, label="S1_figures")
 
-    payload = json.loads((tmp_path / "S1_nightly.json").read_text())
+    payload = json.loads((tmp_path / "S1_figures.json").read_text())
     # A top-level post carries no thread_ts; its files ride in its own thread.
     assert "thread_ts" not in payload
     assert len(payload["files"]) == 2
+
+
+def test_the_curve_travels_with_the_nightly_maps(config):
+    """Asked for explicitly: every coverage figure in the one thread."""
+    from chatterbox.slackbot.blocks import sim_figures
+
+    result = sim_result()
+    figures = sim_figures(result)
+    assert figures[0] == result.curve_plot, "the cumulative curve reads first"
+    assert figures[1:] == result.nightly_plots
+    text = render_blocks_as_text(build_sim_figures_blocks(result, config))
+    assert "Cumulative coverage" in text
+
+
+def test_figures_are_empty_when_nothing_rendered(config):
+    from chatterbox.slackbot.blocks import sim_figures
+
+    assert sim_figures(sim_result(curve_plot=None, nightly_plots=[])) == []
+
+
+def test_the_coverage_reply_says_where_the_figures_went(config):
+    """Otherwise a reply with no image reads as "no figures were made"."""
+    from chatterbox.slackbot.blocks import build_sim_reply_blocks
+
+    text = render_blocks_as_text(build_sim_reply_blocks(sim_result(), config))
+    assert "thread of its own" in text
+    # And per-epoch coverage is not lost when that line is added.
+    bare = sim_result(curve_plot=None, nightly_plots=[], coverage_by_epoch={"0": {"g": 0.3}})
+    text = render_blocks_as_text(build_sim_reply_blocks(bare, config))
+    assert "thread of its own" not in text
+    assert "epoch 0: g 30%" in text
 
 
 class RecordingPoster:
@@ -425,8 +457,10 @@ def test_post_sim_results_posts_the_figures(config):
 
     assert len(poster.replies) == 1, "coverage belongs in the alert's thread"
     assert len(poster.posts) == 1, "the figures belong in a message of their own"
-    assert poster.posts[0]["files"] == result.nightly_plots
-    assert poster.posts[0]["label"] == "S251112cm_nightly"
+    assert poster.posts[0]["files"] == [result.curve_plot] + result.nightly_plots
+    assert poster.posts[0]["label"] == "S251112cm_figures"
+    # No figure rides in the alert's thread; they are all in the other message.
+    assert poster.replies[0]["files"] is None
     assert len(sent) == 2
 
 
@@ -444,7 +478,7 @@ def test_figures_are_posted_without_a_parent_message(config):
 
     assert not poster.replies
     labels = [p["label"] for p in poster.posts]
-    assert labels == ["S251112cm_sim", "S251112cm_nightly"]
+    assert labels == ["S251112cm_sim", "S251112cm_figures"]
     assert len(sent) == 2
 
 
@@ -463,7 +497,7 @@ def test_a_failed_coverage_post_still_posts_the_figures(config):
     poster.post = fail_first
     sent = post_sim_results(sim_result(), config, poster, parent=None)
 
-    assert [p["label"] for p in poster.posts] == ["S251112cm_nightly"]
+    assert [p["label"] for p in poster.posts] == ["S251112cm_figures"]
     assert len(sent) == 1
 
 
@@ -479,11 +513,11 @@ def test_dry_run_writes_both_payloads(config, tmp_path):
         plots.append(str(path))
 
     poster = SlackPoster(config, dry_run=True, output_dir=tmp_path)
-    post_sim_results(sim_result(nightly_plots=plots), config, poster)
+    post_sim_results(sim_result(curve_plot=None, nightly_plots=plots), config, poster)
 
     assert (tmp_path / "S251112cm_sim.json").is_file()
-    nightly = json.loads((tmp_path / "S251112cm_nightly.json").read_text())
-    assert nightly["files"] == plots
+    figures = json.loads((tmp_path / "S251112cm_figures.json").read_text())
+    assert figures["files"] == plots
 
 
 def test_the_service_delivers_the_figures_when_stage_one_did_not_post(config, monkeypatch, tmp_path):
@@ -501,7 +535,7 @@ def test_the_service_delivers_the_figures_when_stage_one_did_not_post(config, mo
     report = SimpleNamespace(posted=None)
     app._start_simulation(trigger, config, poster, report, sim_wait=True)
 
-    assert [p["label"] for p in poster.posts] == ["S251112cm_sim", "S251112cm_nightly"]
+    assert [p["label"] for p in poster.posts] == ["S251112cm_sim", "S251112cm_figures"]
 
 
 def test_test_alerts_route_both_messages(config):
@@ -529,3 +563,144 @@ def test_test_alerts_route_both_messages(config):
     recorder.post = capture
     post_sim_results(sim_result(), config, recorder, is_test=True)
     assert calls == [True, True]
+
+
+# ------------------------------------------------------- surviving the process
+
+
+def background_sim(monkeypatch, tmp_path, delay_s=0.2):
+    """A backgrounded simulation whose driver takes `delay_s` to finish."""
+    import time
+    from types import SimpleNamespace
+
+    from chatterbox import app
+
+    def wait(timeout=None):
+        time.sleep(delay_s)
+        return 0
+
+    job = SimpleNamespace(job_dir=tmp_path, wait=wait, tail_log=lambda lines=20: "")
+    monkeypatch.setattr(app, "launch_simulation", lambda trigger, cfg: job)
+    monkeypatch.setattr(app, "load_sim_result", lambda job_dir: sim_result())
+    return app, job
+
+
+def test_a_backgrounded_simulation_is_joinable(config, monkeypatch, tmp_path):
+    """Why nothing posted: the posting thread died with the process.
+
+    ``launch_simulation`` detaches the driver with ``start_new_session``, so
+    the simulation survives the CLI exiting and writes every PNG. The daemon
+    thread waiting to post it does not. The report must therefore expose that
+    thread, so a caller about to exit can wait for it.
+    """
+    from types import SimpleNamespace
+
+    app, _ = background_sim(monkeypatch, tmp_path)
+    poster = RecordingPoster()
+    report = app.TriggerReport(
+        trigger=SimpleNamespace(source="S251112cm", is_test=False),
+        events=None,
+        dark_hours=None,
+        dark_stats={},
+        template_coverage=None,
+        blocks=[],
+        text="",
+    )
+    app._start_simulation(report.trigger, config, poster, report, sim_wait=False)
+
+    assert report.sim_thread is not None, "the caller cannot wait for what it cannot see"
+    assert not poster.posts, "the driver has not finished yet"
+    assert report.wait_for_simulation(timeout=30)
+    assert [p["label"] for p in poster.posts] == ["S251112cm_sim", "S251112cm_figures"]
+
+
+def test_waiting_reports_a_simulation_that_is_still_running(config, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    app, _ = background_sim(monkeypatch, tmp_path, delay_s=5.0)
+    report = app.TriggerReport(
+        trigger=SimpleNamespace(source="S251112cm", is_test=False),
+        events=None,
+        dark_hours=None,
+        dark_stats={},
+        template_coverage=None,
+        blocks=[],
+        text="",
+    )
+    app._start_simulation(report.trigger, config, RecordingPoster(), report, sim_wait=False)
+    assert not report.wait_for_simulation(timeout=0.05)
+
+
+def test_the_service_names_the_command_that_posts_a_stranded_run(config, monkeypatch, tmp_path, caplog):
+    """A shutdown mid-simulation must leave a way to post it."""
+    from types import SimpleNamespace
+
+    app, job = background_sim(monkeypatch, tmp_path, delay_s=5.0)
+    report = app.TriggerReport(
+        trigger=SimpleNamespace(source="S251112cm", is_test=False),
+        events=None,
+        dark_hours=None,
+        dark_stats={},
+        template_coverage=None,
+        blocks=[],
+        text="",
+    )
+    app._start_simulation(report.trigger, config, RecordingPoster(), report, sim_wait=False)
+
+    with caplog.at_level("WARNING"):
+        app.drain_simulations([report], grace_s=0.05)
+    assert f"chatterbox post-sim {tmp_path}" in caplog.text
+
+
+# ------------------------------------------------------------------- post-sim
+
+
+def finished_job_dir(tmp_path, **overrides):
+    """A job directory as the driver leaves it, with real figure files."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    figures = []
+    for name in ("coverage.png", "S251112cm_night011_visits.png"):
+        path = tmp_path / name
+        path.write_bytes(b"x")
+        figures.append(str(path))
+    result = sim_result(curve_plot=figures[0], nightly_plots=figures[1:], **overrides)
+    (tmp_path / "result.json").write_text(json.dumps(result.__dict__))
+    return tmp_path, figures
+
+
+def test_post_sim_posts_a_finished_run(config, tmp_path, capsys):
+    """The recovery path for a run whose launcher had already exited."""
+    from chatterbox.cli import main
+
+    job_dir, figures = finished_job_dir(tmp_path / "job")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"paths: {{work_dir: {tmp_path / 'work'}}}\n")
+
+    assert main(["-c", str(config_path), "post-sim", str(job_dir), "--dry-run"]) == 0
+    posts = tmp_path / "work" / "posts"
+    payload = json.loads((posts / "S251112cm_figures.json").read_text())
+    assert payload["files"] == figures
+    assert (posts / "S251112cm_sim.json").is_file()
+
+
+def test_post_sim_refuses_a_directory_with_no_result(config, tmp_path, capsys):
+    from chatterbox.cli import main
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"paths: {{work_dir: {tmp_path / 'work'}}}\n")
+    unfinished = tmp_path / "still-running"
+    unfinished.mkdir()
+
+    assert main(["-c", str(config_path), "post-sim", str(unfinished), "--dry-run"]) == 1
+    assert "has not finished" in capsys.readouterr().err
+
+
+def test_post_sim_routes_a_test_alert(config, tmp_path):
+    """result.json does not record is_test; job.json does."""
+    from chatterbox.sim.runner import read_job_spec
+
+    job_dir, _ = finished_job_dir(tmp_path / "job")
+    (job_dir / "job.json").write_text(json.dumps({"source": "S251112cm", "is_test": True}))
+    assert read_job_spec(job_dir)["is_test"] is True
+    # And a job directory from before that field existed still posts.
+    assert read_job_spec(tmp_path / "nonexistent") == {}

@@ -42,6 +42,7 @@ __all__ = [
     "launch_simulation",
     "load_sim_result",
     "write_job_spec",
+    "read_job_spec",
     "resolve_sim_python",
     "check_sim_python",
 ]
@@ -224,6 +225,9 @@ def write_job_spec(trigger: Trigger, config: Config, job_dir: Path, nights: int)
         "source": trigger.source,
         "alert_type": trigger.alert_type,
         "nights": nights,
+        # Not used by the driver, but 'post-sim' needs it to route a test alert
+        # to the test channel long after the trigger itself is gone.
+        "is_test": bool(trigger.is_test),
         "event_trigger_timestamp": trigger.event_trigger_timestamp,
         "event_mjd": float(trigger.event_time.mjd) if trigger.event_time is not None else None,
         "reward_map_nside": trigger.reward_map_nside,
@@ -360,6 +364,25 @@ def launch_simulation(
     if wait:
         job.wait(timeout=config.sim.timeout_s)
     return job
+
+
+def read_job_spec(job_dir: str | Path) -> dict[str, Any]:
+    """Read back a job directory's ``job.json``.
+
+    Returns
+    -------
+    spec : `dict`
+        Empty when there is no readable spec, so a job directory written by an
+        older version still posts.
+    """
+    path = Path(job_dir).expanduser() / "job.json"
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except Exception as exc:
+        logger.warning("Could not parse %s: %s", path, exc)
+        return {}
 
 
 def load_sim_result(job_dir: str | Path) -> SimResult | None:

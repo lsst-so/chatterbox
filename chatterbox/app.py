@@ -38,14 +38,21 @@ from .plots.darkhours import plot_dark_hours, region_hours_summary
 from .plots.templates import plot_template_coverage
 from .sim.runner import SimResult, launch_simulation, load_sim_result
 from .slackbot.blocks import (
-    build_nightly_visits_blocks,
+    build_sim_figures_blocks,
     build_sim_reply_blocks,
     build_trigger_blocks,
     plain_text_summary,
+    sim_figures,
 )
 from .slackbot.client import PostedMessage, SlackPoster
 
-__all__ = ["TriggerReport", "process_trigger", "post_sim_results", "run_service"]
+__all__ = [
+    "TriggerReport",
+    "process_trigger",
+    "post_sim_results",
+    "drain_simulations",
+    "run_service",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +73,33 @@ class TriggerReport:
     elapsed_s: float = 0.0
     #: Non-fatal problems encountered, for reporting in the CLI.
     warnings: list[str] = field(default_factory=list)
+    #: The simulation that was launched, and the thread waiting to post it.
+    sim_job: Any = None
+    sim_thread: threading.Thread | None = None
+
+    def wait_for_simulation(self, timeout: float | None = None) -> bool:
+        """Block until the launched simulation has been posted.
+
+        Callers that are about to exit *must* do this. The simulation itself
+        runs in a detached process and survives, but the thread that waits for
+        it and posts the result is a daemon: if the process exits first, the
+        figures are written to the job directory and never posted.
+
+        Parameters
+        ----------
+        timeout : `float`, optional
+            Seconds to wait. None waits indefinitely.
+
+        Returns
+        -------
+        done : `bool`
+            False when the simulation is still running, so the caller can say
+            where to find it.
+        """
+        if self.sim_thread is None:
+            return True
+        self.sim_thread.join(timeout=timeout)
+        return not self.sim_thread.is_alive()
 
 
 def _build_plots(
@@ -282,37 +316,37 @@ def post_sim_results(
     sent: list[PostedMessage] = []
 
     blocks = build_sim_reply_blocks(result, config)
-    files = [result.curve_plot] if result.curve_plot else None
     summary = f"Simulation for {result.source}: " + (
         ", ".join(f"{b} {100 * v:.0f}%" for b, v in result.coverage.items() if v > 0)
         or (result.error or "no coverage")
     )
     try:
         if parent is not None:
-            posted = poster.reply(parent, blocks, summary, files=files, label=f"{result.source}_sim")
+            posted = poster.reply(parent, blocks, summary, label=f"{result.source}_sim")
         else:
-            posted = poster.post(blocks, summary, is_test=is_test, files=files, label=f"{result.source}_sim")
+            posted = poster.post(blocks, summary, is_test=is_test, label=f"{result.source}_sim")
         if posted is not None:
             sent.append(posted)
     except Exception as exc:
         logger.error("Could not post the simulation coverage: %s", exc)
 
-    # Its own message, and caught separately: losing the coverage text must not
-    # also lose the figures.
-    if result.nightly_plots:
+    # Every figure together, in a message of its own, and caught separately:
+    # losing the numbers must not also lose the figures.
+    figures = sim_figures(result)
+    if figures:
         try:
             sent.append(
                 poster.post(
-                    build_nightly_visits_blocks(result, config),
-                    f"Simulated nightly coverage of {result.source}: "
-                    f"{len(result.nightly_plots)} night(s), run in {result.job_dir}",
+                    build_sim_figures_blocks(result, config),
+                    f"Simulated coverage of {result.source}: {len(figures)} figure(s), "
+                    f"run in {result.job_dir}",
                     is_test=is_test,
-                    files=result.nightly_plots,
-                    label=f"{result.source}_nightly",
+                    files=figures,
+                    label=f"{result.source}_figures",
                 )
             )
         except Exception as exc:
-            logger.error("Could not post the nightly coverage plots: %s", exc)
+            logger.error("Could not post the simulation figures: %s", exc)
 
     return sent
 
@@ -328,6 +362,7 @@ def _start_simulation(
     job = launch_simulation(trigger, config)
     if job is None:
         return
+    report.sim_job = job
 
     def finish() -> None:
         job.wait(timeout=config.sim.timeout_s)
@@ -358,6 +393,9 @@ def _start_simulation(
     else:
         thread = threading.Thread(target=finish, name=f"sim-{trigger.source}", daemon=True)
         thread.start()
+        # The caller has to keep the process alive until this finishes; see
+        # `TriggerReport.wait_for_simulation`.
+        report.sim_thread = thread
 
 
 def run_service(config: Config, paths=None, run_sim: bool = True) -> int:
@@ -382,10 +420,14 @@ def run_service(config: Config, paths=None, run_sim: bool = True) -> int:
     source = make_source(config, paths=paths)
     poster = SlackPoster(config)
     handled = 0
+    pending: list[TriggerReport] = []
     try:
         for record, metadata in source:
             try:
-                process_trigger(record, config, poster=poster, run_sim=run_sim)
+                report = process_trigger(record, config, poster=poster, run_sim=run_sim)
+                pending = [r for r in pending if not r.wait_for_simulation(timeout=0)]
+                if report.sim_thread is not None:
+                    pending.append(report)
                 handled += 1
             except Exception as exc:
                 logger.error(
@@ -404,4 +446,25 @@ def run_service(config: Config, paths=None, run_sim: bool = True) -> int:
         logger.info("Interrupted; shutting down after %d record(s)", handled)
     finally:
         source.close()
+        drain_simulations(pending)
     return handled
+
+
+def drain_simulations(pending: list[TriggerReport], grace_s: float = 10.0) -> None:
+    """Give running simulations a moment to post, then say where they are.
+
+    A simulation outlives the service that started it, so shutting down while
+    one is in flight would otherwise lose its post silently. Waiting the full
+    run out is not an option during a shutdown, so anything still going is
+    named along with the command that posts it afterwards.
+    """
+    for report in pending:
+        if report.wait_for_simulation(timeout=grace_s):
+            continue
+        job_dir = getattr(report.sim_job, "job_dir", "the job directory")
+        logger.warning(
+            "Simulation for %s is still running; its results were not posted. "
+            "Post them when it finishes with: chatterbox post-sim %s",
+            report.trigger.source,
+            job_dir,
+        )

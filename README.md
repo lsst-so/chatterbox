@@ -32,18 +32,19 @@ result of a scheduler simulation.
 for a full 20–50 night run):
 
 - **Expected fraction of the localization covered in each band**, plus a
-  per-epoch breakdown, an "any band" total, and a cumulative-coverage plot.
+  per-epoch breakdown and an "any band" total.
 
-**And, from the same simulation, in a thread of its own:**
+**And, in a thread of its own, every figure that simulation produced:**
 
-- **Per-night, per-band maps of simulated visit counts** with the localization
-  contour drawn on top, one figure per night, plus the path the simulation ran
-  in and the visit database it wrote. Only nights with visits that overlap the
-  contour are plotted; every visit counts towards that, not just the tagged ToO
-  follow-up, since a nominal-cadence pass landing on the localization covers it
-  just as well. These get their own thread rather than the alert's, which a
-  20-night run would otherwise flood; set `sim.nightly_plots: false` to turn
-  them off.
+- **The cumulative-coverage curve** over the whole run, then **per-night,
+  per-band maps of simulated visit counts** with the localization contour drawn
+  on top, one figure per night — plus the path the simulation ran in and the
+  visit database it wrote. Only nights with visits that overlap the contour are
+  plotted; every visit counts towards that, not just the tagged ToO follow-up,
+  since a nominal-cadence pass landing on the localization covers it just as
+  well. The figures get their own thread rather than the alert's, which a
+  20-night run would otherwise flood; set `sim.nightly_plots: false` to stop
+  producing the per-night ones.
 
 ## Install
 
@@ -176,15 +177,28 @@ database of visits, the cumulative-coverage plot, and the per-night visit-count
 figures, so the sim can be inspected without going through Slack.
 
 `simulate` posts nothing by default, since it is an inspection command. Add
-`--post` to send the coverage and the per-night figures to the channel — the
-same two messages the service posts, minus the alert thread to hang the coverage
-under, so it goes out standalone. `--dry-run` renders both payloads under
+`--post` to send the coverage and the figures to the channel — the same two
+messages the service posts, minus the alert thread to hang the coverage under,
+so it goes out standalone. `--dry-run` renders both payloads under
 `<work_dir>/posts` instead, which is how to read a real run's messages before
 letting them reach anyone:
 
 ```bash
 python -m chatterbox.cli simulate tests/data/gw_case_b.json --nights 3 --post
 ```
+
+Post a simulation that already finished, from its job directory:
+
+```bash
+python -m chatterbox.cli post-sim ~/.chatterbox/work/sim/S251112cm_20260814T192732
+```
+
+This is the recovery path when a simulation outlived whatever launched it. A
+simulation runs in a **detached** process, so it survives the CLI exiting and
+writes every figure — but the thread waiting to post it does not. `replay` and
+`serve` therefore wait for a launched simulation before exiting (Ctrl-C leaves
+it running and prints this command), and if a service is shut down mid-run it
+logs the same command for the job it had to abandon.
 
 ## The one thing to understand: area vs probability
 
@@ -226,7 +240,7 @@ chatterbox/
   slackbot/       Block Kit construction, delivery
   app.py          two-stage orchestration
   cli.py          serve | replay | refresh-templates | refresh-opsim |
-                  simulate | test-post | doctor
+                  simulate | post-sim | test-post | doctor
 scripts/
   make_fixture.py generate realistic record fixtures from real skymaps
 ```
@@ -241,7 +255,7 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 .venv/bin/python -m pytest
 ```
 
-319 tests, no network access required. Notable checks:
+328 tests, no network access required. Notable checks:
 
 - The dark-hours map is validated against `astropy`'s full `AltAz` transform —
   an independent code path from the fast approximation used in production —
@@ -259,6 +273,9 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 - The simulation's figures reach Slack even when the alert has no message to
   thread onto, and a failed coverage post does not take them down with it —
   both were ways for a run to produce PNGs and post nothing.
+- A backgrounded simulation is joinable, and a service shut down mid-run names
+  the `post-sim` command for the job it abandoned. The posting thread dying with
+  its process was the reason a `replay` wrote every figure and posted none.
 
 ## Known limitations
 

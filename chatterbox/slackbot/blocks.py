@@ -25,7 +25,8 @@ from ..sim.runner import SimResult
 __all__ = [
     "build_trigger_blocks",
     "build_sim_reply_blocks",
-    "build_nightly_visits_blocks",
+    "build_sim_figures_blocks",
+    "sim_figures",
     "plain_text_summary",
     "MAX_SECTION_CHARS",
 ]
@@ -443,6 +444,9 @@ def build_sim_reply_blocks(result: SimResult, config: Config) -> list[dict[str, 
             ":warning: These are *area* fractions, not probabilities: no probability skymap was "
             "available for this event."
         )
+    if sim_figures(result):
+        # Say where they went, so their absence here does not read as "none".
+        lines.append("_Every figure from this run is posted in a thread of its own._")
     blocks = [_section("\n".join(lines))]
 
     if result.coverage_by_epoch:
@@ -468,8 +472,29 @@ def build_sim_reply_blocks(result: SimResult, config: Config) -> list[dict[str, 
     return blocks
 
 
-def build_nightly_visits_blocks(result: SimResult, config: Config) -> list[dict[str, Any]]:
-    """Blocks for the nightly visit-coverage post.
+def sim_figures(result: SimResult) -> list[str]:
+    """Every figure a finished simulation produced, in reading order.
+
+    The cumulative curve first, because it answers "how much in total?", then
+    one per-night map. They travel together so a reader has the whole picture
+    in one place.
+
+    Parameters
+    ----------
+    result : `SimResult`
+        Completed simulation.
+
+    Returns
+    -------
+    paths : `list` [`str`]
+        Possibly empty, when every figure failed to render.
+    """
+    figures = [result.curve_plot] if result.curve_plot else []
+    return figures + list(result.nightly_plots)
+
+
+def build_sim_figures_blocks(result: SimResult, config: Config) -> list[dict[str, Any]]:
+    """Blocks for the message carrying the simulation's figures.
 
     This starts its own Slack thread rather than replying in the alert's: a
     20-night run attaches many figures, and burying them under the alert would
@@ -478,7 +503,8 @@ def build_nightly_visits_blocks(result: SimResult, config: Config) -> list[dict[
     Parameters
     ----------
     result : `SimResult`
-        Completed simulation, with `SimResult.nightly_plots` populated.
+        Completed simulation, with `SimResult.nightly_plots` or
+        `SimResult.curve_plot` populated.
     config : `Config`
         Configuration, for the artifact base URL.
 
@@ -489,12 +515,22 @@ def build_nightly_visits_blocks(result: SimResult, config: Config) -> list[dict[
     nights = result.nightly_plot_nights
     shown = len(result.nightly_plots)
     lines = [
-        f":milky_way: *Simulated nightly coverage of {result.source}* (`{result.alert_type}`)",
-        f"Per-band visit counts for every simulated night whose visits overlap the "
-        f"localization contour, with the contour drawn on each panel. "
-        f"{result.nights_with_overlap} such night(s) across the "
-        f"{result.nights}-night simulation.",
+        f":milky_way: *Simulated coverage of {result.source}* (`{result.alert_type}`)",
     ]
+    if result.curve_plot:
+        lines.append(
+            f"Cumulative coverage of the localization {result.quantity} over the "
+            f"{result.nights}-night simulation, then per-band visit counts for every "
+            f"night whose visits overlap the localization contour, with the contour "
+            f"drawn on each panel. {result.nights_with_overlap} such night(s)."
+        )
+    else:
+        lines.append(
+            f"Per-band visit counts for every simulated night whose visits overlap the "
+            f"localization contour, with the contour drawn on each panel. "
+            f"{result.nights_with_overlap} such night(s) across the "
+            f"{result.nights}-night simulation."
+        )
     if result.overlap_visits:
         # Both numbers are counted within the overlapping set, so the split is
         # a real split; an all-sky ToO count could exceed the overlap total.
@@ -518,7 +554,7 @@ def build_nightly_visits_blocks(result: SimResult, config: Config) -> list[dict[
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"Nightly coverage: {result.source}"[:150],
+                "text": f"Simulated coverage: {result.source}"[:150],
             },
         },
         _section("\n".join(lines)),

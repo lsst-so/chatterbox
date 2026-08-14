@@ -14,6 +14,8 @@ Subcommands
 ``simulate``
     Run the scheduler simulation for a record synchronously and print coverage.
     ``--post`` sends the coverage and the per-night figures to Slack as well.
+``post-sim``
+    Post the results of a simulation that already ran, from its job directory.
 ``test-post``
     Send a short message to confirm Slack credentials and channel access.
 ``doctor``
@@ -61,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_replay.add_argument(
         "--sim-wait",
         action="store_true",
-        help="Wait for the simulation and print its coverage before exiting",
+        help="Wait inline and print the simulation's coverage (a replay always waits for it)",
     )
     p_replay.add_argument("--out-dir", help="Where to write plots")
 
@@ -98,6 +100,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Render those Slack payloads to disk instead of sending them",
+    )
+
+    p_post_sim = sub.add_parser(
+        "post-sim",
+        help="Post the results of a simulation that already ran, from its job directory",
+    )
+    p_post_sim.add_argument("job_dir", help="Simulation job directory (holds result.json)")
+    p_post_sim.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Render the Slack payloads to disk instead of sending them",
     )
 
     sub.add_parser("test-post", help="Post a test message to confirm Slack access")
@@ -138,6 +151,7 @@ def _cmd_replay(args: argparse.Namespace, config: Config) -> int:
     out_dir = Path(args.out_dir).expanduser() if args.out_dir else None
 
     failures = 0
+    pending = []
     for path in args.paths:
         print(f"\n{'=' * 72}\n{path}\n{'=' * 72}")
         try:
@@ -166,8 +180,61 @@ def _cmd_replay(args: argparse.Namespace, config: Config) -> int:
             print(f"  warning: {warning}")
         if report.posted is not None and report.posted.offline:
             print("  (offline: payload written instead of posted)")
+        if report.sim_thread is not None:
+            pending.append(report)
+
+    # Exiting here would abandon the simulations: they run detached and
+    # survive, but the threads waiting to post them do not, which is how a run
+    # ends up with figures on disk and nothing in Slack.
+    for report in pending:
+        job_dir = getattr(report.sim_job, "job_dir", "")
+        print(
+            f"\nWaiting for the simulation of {report.trigger.source} to finish so its "
+            f"results can be posted. Ctrl-C leaves it running; post it afterwards with:\n"
+            f"  chatterbox post-sim {job_dir}"
+        )
+        try:
+            if not report.wait_for_simulation(timeout=config.sim.timeout_s):
+                print(f"  simulation still running after {config.sim.timeout_s} s; not posted")
+                failures += 1
+        except KeyboardInterrupt:
+            print(f"  left running in {job_dir}")
+            break
 
     return 1 if failures else 0
+
+
+def _cmd_post_sim(args: argparse.Namespace, config: Config) -> int:
+    from .app import post_sim_results
+    from .sim.runner import load_sim_result, read_job_spec
+    from .slackbot.client import SlackPoster
+
+    job_dir = Path(args.job_dir).expanduser()
+    result = load_sim_result(job_dir)
+    if result is None:
+        print(
+            f"No result.json in {job_dir}: the simulation has not finished, or it is not "
+            f"a job directory.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # job.json knows whether the alert was a test; result.json does not.
+    spec = read_job_spec(job_dir)
+    is_test = bool(spec.get("is_test", False))
+
+    poster = SlackPoster(config, dry_run=args.dry_run)
+    print(f"{result.source} ({result.alert_type}), {result.nights} nights, status {result.status}")
+    sent = post_sim_results(result, config, poster, is_test=is_test)
+    if not sent:
+        print("Nothing was posted; see the log above.", file=sys.stderr)
+        return 1
+    if poster.offline:
+        print(f"{len(sent)} payload(s) written under {poster.output_dir}")
+    else:
+        for posted in sent:
+            print(f"Posted to {posted.channel} (ts={posted.ts}, {len(posted.uploaded)} file(s))")
+    return 0
 
 
 def _cmd_refresh_templates(args: argparse.Namespace, config: Config) -> int:
@@ -335,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
         "refresh-templates": _cmd_refresh_templates,
         "refresh-opsim": _cmd_refresh_opsim,
         "simulate": _cmd_simulate,
+        "post-sim": _cmd_post_sim,
         "test-post": _cmd_test_post,
         "doctor": _cmd_doctor,
     }
