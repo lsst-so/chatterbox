@@ -156,7 +156,72 @@ def test_run_service_continues_past_a_bad_record(config, data_dir, tmp_path, rub
     with caplog.at_level("ERROR"):
         handled = run_service(config, paths=paths, run_sim=False)
     assert handled == 1
-    assert "Failed to handle a record" in caplog.text
+    assert "handling a ToO record" in caplog.text
+
+
+def test_a_dropped_record_is_announced_in_the_channel(config, data_dir, tmp_path, rubin_scheduler):
+    """A ToO nobody hears about is indistinguishable from no ToO at all."""
+    from chatterbox.app import run_service
+
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"source": "S251112cm", "is_test": True}))
+    assert run_service(config, paths=[bad], run_sim=False) == 0
+
+    # No token in the test environment, so the poster is offline and writes the
+    # payload it would have sent.
+    payload = json.loads((tmp_path / "work" / "posts" / "S251112cm_failure.json").read_text())
+    text = json.dumps(payload)
+    assert "chatterbox failed while handling a ToO record" in text
+    assert "S251112cm" in text
+    assert "missing required field" in text, "the reason has to be in the message"
+
+
+class BrokenSource:
+    """A monitoring source that fails the way an EFD outage would."""
+
+    def __init__(self):
+        self.closed = False
+
+    def __iter__(self):
+        raise RuntimeError("5 consecutive EFD queries failed; last error: TimeoutError: ")
+        yield  # pragma: no cover - unreachable, but makes this a generator
+
+    def mark_done(self, metadata):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+def test_a_broken_stream_is_announced_before_the_service_stops(config, tmp_path, monkeypatch):
+    """Nothing else would notice: the service just stops seeing alerts."""
+    from chatterbox import app
+    from chatterbox.ingest import source as source_module
+
+    broken = BrokenSource()
+    monkeypatch.setattr(source_module, "make_source", lambda *args, **kwargs: broken)
+    config.ingest.kind = "efd"
+
+    with pytest.raises(RuntimeError, match="consecutive EFD queries"):
+        app.run_service(config, run_sim=False)
+
+    assert broken.closed, "the source is closed even on the way out"
+    payload = json.loads((tmp_path / "work" / "posts" / "chatterbox_failure.json").read_text())
+    text = json.dumps(payload)
+    assert "monitoring for ToO alerts (efd)" in text
+    assert "consecutive EFD queries failed" in text
+
+
+def test_serve_exits_non_zero_instead_of_tracebacking(config, tmp_path, monkeypatch):
+    from chatterbox import app, cli
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("influx is unreachable")
+
+    monkeypatch.setattr(app, "run_service", explode)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"paths: {{work_dir: {tmp_path / 'work'}}}\n")
+    assert cli.main(["-c", str(config_path), "serve"]) == 1
 
 
 def test_sim_job_spec_is_self_describing(record, config, tmp_path):
@@ -214,3 +279,102 @@ def test_cli_replay_dry_run(data_dir, tmp_path, rubin_scheduler, monkeypatch, ca
     assert "IceCube-260814A" in out
     assert "Accessible dark hours" in out
     assert "Stage 1 completed in" in out
+
+
+# ------------------------------------------------- anchoring nights on the ToO
+
+
+def test_day_obs_is_the_observing_night_not_the_utc_date(rubin_scheduler):
+    """An alert after midnight UTC must not be pushed to the next evening.
+
+    A Rubin observing day runs 12:00 UTC to 12:00 UTC. Using the trigger's UTC
+    calendar date instead splits the Chilean night in half, so anything
+    arriving between 00:00 and 12:00 UTC -- the back half of the night, when a
+    fast response matters most -- named the following evening and delayed the
+    whole simulated follow-up by a day.
+    """
+    from astropy.time import Time
+
+    from chatterbox.sim.driver import day_obs_for
+
+    # 02:00 UTC is 23:00 the previous evening in Chile: the same night.
+    assert day_obs_for(Time("2025-11-12T02:00:00").mjd) == 20251111
+    assert day_obs_for(Time("2025-11-12T11:59:00").mjd) == 20251111
+    # ...and the boundary is 12:00 UTC, not local midnight.
+    assert day_obs_for(Time("2025-11-12T12:01:00").mjd) == 20251112
+    # S251112cm fired at 15:18 UTC, which was already correct.
+    assert day_obs_for(Time("2025-11-12T15:18:45.362").mjd) == 20251112
+
+
+def test_day_obs_matches_rubin_nights(rubin_scheduler):
+    """The convention is upstream's; this must not drift from it."""
+    from astropy.time import Time
+    from rubin_nights import dayobs_utils
+
+    from chatterbox.sim.driver import day_obs_for
+
+    for iso in ("2025-11-12T02:00:00", "2025-11-12T15:18:45", "2026-01-01T00:30:00"):
+        when = Time(iso)
+        assert day_obs_for(when.mjd) == int(dayobs_utils.time_to_day_obs_int(when))
+
+
+def test_the_trigger_night_uses_the_observatory_night_counter(rubin_scheduler):
+    """The only definition that can agree with the ``night`` column.
+
+    ``ModelObservatory`` sets ``observation["night"]`` to
+    ``floor(mjd - mjd_start)`` -- a day count from a noon-UTC epoch, not an
+    almanac sunset lookup. Anything else is off by one for part of the night.
+    """
+    from types import SimpleNamespace
+
+    import numpy as np
+    from astropy.time import Time
+    from rubin_scheduler.utils import SURVEY_START_MJD
+
+    from chatterbox.sim.driver import _trigger_night
+
+    observatory = SimpleNamespace(mjd_start=SURVEY_START_MJD)
+    event = Time("2025-11-12T15:18:45.362").mjd
+    assert _trigger_night(observatory, event) == int(np.floor(event - SURVEY_START_MJD))
+    assert _trigger_night(observatory, event) == 11
+
+    # The whole Chilean night shares one number: 02:00 UTC on the 12th is the
+    # back half of the night that began on the 11th.
+    assert _trigger_night(observatory, Time("2025-11-12T02:00:00").mjd) == 10
+    assert _trigger_night(observatory, Time("2025-11-12T23:30:00").mjd) == 11
+
+
+def test_the_run_starts_on_the_trigger_night(rubin_scheduler):
+    """day_obs and the night counter share the 12:00 UTC boundary.
+
+    That is what makes "night +0" the trigger night: the observing day the
+    simulation is told to start on is the one the trigger falls in.
+    """
+    from types import SimpleNamespace
+
+    import numpy as np
+    from astropy.time import Time
+    from rubin_scheduler.utils import SURVEY_START_MJD
+
+    from chatterbox.sim.driver import _trigger_night, day_obs_for
+
+    observatory = SimpleNamespace(mjd_start=SURVEY_START_MJD)
+    for iso in ("2025-11-12T15:18:45.362", "2025-11-12T02:00:00", "2026-01-01T00:30:00"):
+        event = Time(iso).mjd
+        # The night the run's own day_obs falls in, taken at its 12:00 UTC
+        # start so it cannot land on the boundary.
+        day_obs = str(day_obs_for(event))
+        start = Time(f"{day_obs[:4]}-{day_obs[4:6]}-{day_obs[6:]}T12:00:00").mjd
+        first_night = int(np.floor(start - SURVEY_START_MJD))
+        assert first_night == _trigger_night(observatory, event), iso
+
+
+def test_an_unreadable_observatory_leaves_nights_unanchored(caplog):
+    """Better bare survey nights than a wrong anchor."""
+    from types import SimpleNamespace
+
+    from chatterbox.sim.driver import _trigger_night
+
+    with caplog.at_level("WARNING"):
+        assert _trigger_night(SimpleNamespace(), 60991.0) is None
+    assert "which night the trigger fell on" in caplog.text

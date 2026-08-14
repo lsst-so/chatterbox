@@ -137,7 +137,14 @@ def _configure_logging(verbose: bool) -> None:
 def _cmd_serve(args: argparse.Namespace, config: Config) -> int:
     from .app import run_service
 
-    handled = run_service(config, run_sim=not args.no_sim)
+    try:
+        handled = run_service(config, run_sim=not args.no_sim)
+    except Exception as exc:
+        # run_service has already posted this to the channel; the operator gets
+        # one line and a non-zero exit, not a traceback, since the traceback is
+        # in the log with the rest of the context.
+        print(f"Monitoring stopped: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
     print(f"Handled {handled} record(s).")
     return 0
 

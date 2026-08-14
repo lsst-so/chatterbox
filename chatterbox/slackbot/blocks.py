@@ -26,6 +26,7 @@ __all__ = [
     "build_trigger_blocks",
     "build_sim_reply_blocks",
     "build_sim_figures_blocks",
+    "build_failure_blocks",
     "sim_figures",
     "plain_text_summary",
     "MAX_SECTION_CHARS",
@@ -457,6 +458,14 @@ def build_sim_reply_blocks(result: SimResult, config: Config) -> list[dict[str, 
             epoch_lines.append(f"epoch {epoch}: {covered or 'nothing scheduled'}")
         blocks.append(_section("*Per epoch*\n" + "\n".join(epoch_lines)))
 
+    if result.cumulative_by_night:
+        # The same progression the per-night figure draws, for readers who are
+        # scanning the thread on a phone and will not open an image.
+        heading = "*Per night* (cumulative, any band)"
+        if result.trigger_night is not None:
+            heading += ", counted from the trigger night"
+        blocks.append(_section(heading + "\n" + _night_progression(result)))
+
     notes = []
     if result.opsim:
         notes.append(f"Visit history: {result.opsim}")
@@ -472,12 +481,42 @@ def build_sim_reply_blocks(result: SimResult, config: Config) -> list[dict[str, 
     return blocks
 
 
+def _night_progression(result: SimResult, max_nights: int = 12) -> str:
+    """Cumulative any-band coverage through each night, on one line.
+
+    A long run is elided in the middle rather than truncated, so the number
+    that matters -- where it ended up -- is always the last one shown.
+
+    Parameters
+    ----------
+    result : `SimResult`
+        Completed simulation with `SimResult.cumulative_by_night` populated.
+    max_nights : `int`
+        Most nights to name before eliding.
+
+    Returns
+    -------
+    line : `str`
+    """
+    nights = sorted(result.cumulative_by_night, key=lambda k: int(k))
+    parts = []
+    for night in nights:
+        # Already relative to the trigger, so keep the sign: "+0" is the
+        # trigger night and "-1" a nominal-cadence pass before it.
+        label = f"{int(night):+d}" if result.trigger_night is not None else str(night)
+        parts.append(f"n{label} {100 * result.cumulative_by_night[night]:.0f}%")
+    if len(parts) > max_nights:
+        parts = parts[: max_nights - 1] + ["..."] + parts[-1:]
+    return " → ".join(parts)
+
+
 def sim_figures(result: SimResult) -> list[str]:
     """Every figure a finished simulation produced, in reading order.
 
-    The cumulative curve first, because it answers "how much in total?", then
-    one per-night map. They travel together so a reader has the whole picture
-    in one place.
+    Widest view first: the cumulative curve answers "how much in total?", the
+    per-night coverage figure breaks that total down by night, and the
+    per-night maps then show where on the sky each of those nights went. They
+    travel together so a reader has the whole picture in one place.
 
     Parameters
     ----------
@@ -490,6 +529,8 @@ def sim_figures(result: SimResult) -> list[str]:
         Possibly empty, when every figure failed to render.
     """
     figures = [result.curve_plot] if result.curve_plot else []
+    if result.nightly_coverage_plot:
+        figures.append(result.nightly_coverage_plot)
     return figures + list(result.nightly_plots)
 
 
@@ -517,20 +558,28 @@ def build_sim_figures_blocks(result: SimResult, config: Config) -> list[dict[str
     lines = [
         f":milky_way: *Simulated coverage of {result.source}* (`{result.alert_type}`)",
     ]
+    # One line per figure, in upload order, so a reader can tell which image is
+    # which without opening them. Numbered as they are added, since any of the
+    # three can be absent.
+    described = []
     if result.curve_plot:
-        lines.append(
-            f"Cumulative coverage of the localization {result.quantity} over the "
-            f"{result.nights}-night simulation, then per-band visit counts for every "
-            f"night whose visits overlap the localization contour, with the contour "
-            f"drawn on each panel. {result.nights_with_overlap} such night(s)."
+        described.append(
+            f"Cumulative coverage of the localization {result.quantity} against time, "
+            f"per band, over the {result.nights}-night simulation."
         )
-    else:
-        lines.append(
-            f"Per-band visit counts for every simulated night whose visits overlap the "
+    if result.nightly_coverage_plot:
+        described.append(
+            "The same coverage night by night: what each band added on each night, "
+            "with the running any-band total over it. Every night of the run is on "
+            "it, from the same ToO follow-up visits the coverage numbers come from."
+        )
+    if result.nightly_plots:
+        described.append(
+            f"Per-band visit counts for every night whose visits overlap the "
             f"localization contour, with the contour drawn on each panel. "
-            f"{result.nights_with_overlap} such night(s) across the "
-            f"{result.nights}-night simulation."
+            f"{result.nights_with_overlap} such night(s)."
         )
+    lines.extend(f"{n}. {text}" for n, text in enumerate(described, start=1))
     if result.overlap_visits:
         # Both numbers are counted within the overlapping set, so the split is
         # a real split; an all-sky ToO count could exceed the overlap total.
@@ -541,7 +590,21 @@ def build_sim_figures_blocks(result: SimResult, config: Config) -> list[dict[str
             f"{other:,} from the nominal cadence."
         )
     if nights:
-        lines.append(f"Nights shown: {', '.join(str(n) for n in nights)}.")
+        if result.trigger_night is not None:
+            labels = [f"{n - result.trigger_night:+d}" for n in nights]
+            lines.append(
+                f"Nights shown, counted from the trigger night: {', '.join(labels)} "
+                f"(survey nights {nights[0]}-{nights[-1]})."
+            )
+            if nights[0] < result.trigger_night:
+                # Otherwise a negative night reads as a mislabelled epoch.
+                lines.append(
+                    "A negative night is *before* the trigger: the run starts from the "
+                    "trigger's `day_obs`, so its first night can precede the alert. Those "
+                    "visits are nominal cadence, not follow-up."
+                )
+        else:
+            lines.append(f"Nights shown: {', '.join(str(n) for n in nights)}.")
     if shown < result.nights_with_overlap:
         # Never let a cap look like "that was all there was".
         lines.append(
@@ -576,6 +639,70 @@ def build_sim_figures_blocks(result: SimResult, config: Config) -> list[dict[str
         notes.append(f"Filter carousel: {result.band_scheduler}")
     if notes:
         blocks.append(_context(" -- ".join(notes)))
+    return blocks
+
+
+def build_failure_blocks(
+    what: str,
+    error: BaseException | str,
+    source: str = "",
+    origin: str = "",
+    log_tail: str = "",
+) -> list[dict[str, Any]]:
+    """Blocks announcing that chatterbox itself failed.
+
+    A ToO is time-critical, so silence is the worst outcome: an alert that
+    nobody hears about looks exactly like no alert at all. This says what broke
+    where, in enough detail to start on it without going to the host first.
+
+    Parameters
+    ----------
+    what : `str`
+        What was being attempted, as a phrase: ``"handling a ToO record"``.
+    error : `BaseException` or `str`
+        The failure. An exception contributes its type as well as its message.
+    source : `str`
+        Event identifier, when it is known. Decoding is one of the things that
+        can fail, so it often is not.
+    origin : `str`
+        Where the record came from -- a file path, a Kafka topic, an EFD topic.
+    log_tail : `str`
+        Last lines of a relevant log, included verbatim.
+
+    Returns
+    -------
+    blocks : `list` [`dict`]
+    """
+    if isinstance(error, BaseException):
+        detail = f"{type(error).__name__}: {error}"
+    else:
+        detail = str(error)
+
+    header = ":rotating_light: *chatterbox failed while " + what + "*"
+    lines = [header]
+    if source:
+        lines.append(f"Event: *{source}*")
+    if origin:
+        lines.append(f"Received from: `{origin}`")
+    lines.append(f"```{detail[:1500]}```")
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": (f"chatterbox failure: {source}" if source else "chatterbox failure")[:150],
+            },
+        },
+        _section("\n".join(lines)),
+    ]
+    if log_tail.strip():
+        blocks.append(_section("*Log tail*\n```" + log_tail.strip()[-1500:] + "```"))
+    blocks.append(
+        _context(
+            "Posted by chatterbox's own error handler, so a failed alert is not silent. "
+            "The service log has the full traceback."
+        )
+    )
     return blocks
 
 

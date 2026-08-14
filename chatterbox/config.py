@@ -75,13 +75,16 @@ class IngestConfig:
 
     ``kind`` selects the transport:
 
+    - ``efd``: poll the EFD for new ``too_alert`` records. This is the default:
+      it needs no broker subscription, and on a summit or USDF host the
+      credentials are already there.
     - ``kafka``: subscribe to the producer's output topic with hop-client.
     - ``files``: watch a directory that ``forward_alerts.py``'s ``FileSender``
       writes ``{source}.json`` into.
     - ``replay``: read explicit paths once, then stop (used by the CLI).
     """
 
-    kind: str = "files"
+    kind: str = "efd"
     #: hop URL, e.g. ``kafka://kafka.scimma.org/lsst.rubin-too-alerts``.
     kafka_url: str = ""
     kafka_group_id: str = "chatterbox"
@@ -89,6 +92,26 @@ class IngestConfig:
     watch_dir: str = "~/.chatterbox/incoming"
     #: Seconds between directory scans.
     poll_interval_s: float = 2.0
+
+    #: EFD instance: ``summit_efd``, ``usdf_efd``, ``idf_efd``, ``base_efd``.
+    #: Empty lets an RSP host choose its own default, which only works where
+    #: ``lsst.summit.utils`` is installed.
+    efd_name: str = "summit_efd"
+    #: InfluxDB database the alerts are written to. Deliberately not the
+    #: default database, which holds the SAL topics.
+    efd_database: str = "lsst.scimma"
+    #: Measurement carrying the records.
+    efd_topic: str = "lsst.scimma.too_alert"
+    #: Seconds between EFD queries. Each one spans every pixel column of the
+    #: reward map, so this is longer than the directory scan interval.
+    efd_poll_interval_s: float = 10.0
+    #: How far before startup the first query reaches. ``0`` means "only new
+    #: alerts": chatterbox does not remember what it has posted, so a lookback
+    #: makes a restart re-post anything inside it.
+    efd_lookback_s: float = 0.0
+    #: Consecutive failed queries tolerated before the service gives up and
+    #: reports it. One failure is a blip; five in a row is an outage.
+    efd_max_consecutive_errors: int = 5
     #: Process alerts flagged ``is_test``. When False they are dropped
     #: entirely.
     allow_tests: bool = True
@@ -200,6 +223,11 @@ class SimConfig:
     #: Resolution of the visit-count maps. These are for looking at, so a
     #: modest value keeps rendering quick.
     nightly_plots_nside: int = 256
+    #: Post a single figure of coverage gained per night, per band, with the
+    #: running total over it. Independent of `nightly_plots`: it is one image
+    #: however long the run is, and it covers every night rather than only the
+    #: ones that fit under the cap.
+    nightly_coverage_plot: bool = True
     #: Filter carousel swap schedule, ``{"YYYY-MM-DD": ["g", "r", ...]}``.
     #:
     #: ``lsst_survey_sim.simulate_lsst.setup_band_scheduler`` hardcodes a

@@ -14,6 +14,9 @@ The job directory is the interface between the two processes:
 ``sim.log``          Driver stdout and stderr.
 ``visits.db``        Opsim database: the visit history plus the simulated
                      visits (written by the driver).
+``coverage.png``     Cumulative coverage against time, per band.
+``coverage_by_night  Coverage gained on each night, per band, with the running
+.png``               any-band total over it.
 ``*_night*.png``     Per-night, per-band simulated visit counts.
 ``result.json``      Coverage results and status (written by the driver).
 ===================  =========================================================
@@ -176,6 +179,21 @@ class SimResult:
     opsim: str = ""
     #: Directory the simulation ran in; every artifact lives here.
     job_dir: str = ""
+    #: Survey night the trigger fell on, which anchors every other night
+    #: number. None for a result written before this was recorded, in which
+    #: case nights are reported as bare survey nights.
+    trigger_night: int | None = None
+    #: First night the simulation itself covered, as a survey night. Usually
+    #: `trigger_night`, but one earlier when the alert arrived after 00:00 UTC
+    #: and before that evening's sunset.
+    first_sim_night: int | None = None
+    #: Coverage gained on each night, ``nights since trigger -> band ->
+    #: fraction``. Add `trigger_night` to recover the survey night.
+    coverage_by_night: dict[str, dict[str, float]] = field(default_factory=dict)
+    #: Total fraction covered through each night, any band, keyed the same way.
+    cumulative_by_night: dict[str, float] = field(default_factory=dict)
+    #: Figure of the above; one image however many nights were simulated.
+    nightly_coverage_plot: str | None = None
     #: Per-night visit-count figures, and the nights they correspond to.
     nightly_plots: list[str] = field(default_factory=list)
     nightly_plot_nights: list[int] = field(default_factory=list)

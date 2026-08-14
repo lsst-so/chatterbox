@@ -32,13 +32,14 @@ def plot_nightly_visits(
     source: str = "",
     alert_type: str = "",
     dpi: int = 130,
+    reference_night: int | None = None,
 ) -> Path | None:
     """Draw one night's per-band visit counts with the localization contour.
 
     Parameters
     ----------
     night : `int`
-        Simulation night index, used in the title.
+        Survey night index, as the visit table labels it.
     band_maps : `dict` [`str`, `numpy.ndarray`]
         Visit counts per pixel, keyed by band, RING ordering.
     localization : `Localization`
@@ -49,6 +50,8 @@ def plot_nightly_visits(
         Event identifiers for the title.
     dpi : `int`
         Output resolution.
+    reference_night : `int`, optional
+        Survey night the trigger fell on, so the title can count from it.
 
     Returns
     -------
@@ -122,7 +125,18 @@ def plot_nightly_visits(
         # which is what used to collide with the panel titles.
         cbar.set_label("Simulated visits per pixel (red contour: localization)")
 
-    title = f"Night {night}"
+    if reference_night is None:
+        title = f"Night {night}"
+    else:
+        relative = int(night) - int(reference_night)
+        when = {0: "the trigger night"}.get(
+            relative,
+            f"{abs(relative)} night{'s' if abs(relative) != 1 else ''} "
+            f"{'after' if relative > 0 else 'before'} the trigger",
+        )
+        # Both numbers: the relative one is what a reader wants, the survey
+        # night is what this file is named after and what the opsim uses.
+        title = f"Night {relative:+d} -- {when} (survey night {night})"
     if source:
         title += f" of the {source} simulation"
     if alert_type:
@@ -155,6 +169,7 @@ def plot_all_nights(
     alert_type: str = "",
     max_nights: int = 10,
     dpi: int = 130,
+    reference_night: int | None = None,
 ) -> tuple[list[Path], list[int], int]:
     """Render one figure per night, oldest first.
 
@@ -175,13 +190,17 @@ def plot_all_nights(
         rather than silently swallowed.
     dpi : `int`
         Output resolution.
+    reference_night : `int`, optional
+        Survey night the trigger fell on, for trigger-relative titles.
 
     Returns
     -------
     paths : `list` [`pathlib.Path`]
         Figures written.
     nights : `list` [`int`]
-        The nights they correspond to.
+        The survey nights they correspond to. Filenames keep the survey night
+        so a figure can be matched against the visit database; the titles and
+        the Slack message count from the trigger.
     total_nights : `int`
         Nights with visits *before* the cap, so a caller can say what it left
         out.
@@ -210,6 +229,7 @@ def plot_all_nights(
                 source=source,
                 alert_type=alert_type,
                 dpi=dpi,
+                reference_night=reference_night,
             )
         except Exception as exc:
             logger.error("Could not render night %d: %s", night, exc)

@@ -281,6 +281,35 @@ def test_kafka_source_requires_a_url():
         KafkaTooAlertSource(url="")
 
 
+def test_the_default_monitoring_path_is_the_efd():
+    """Changed deliberately: watching a directory needs a file sender."""
+    from chatterbox.ingest.efd import EFD_DATABASE, EFD_TOPIC, EfdTooAlertSource
+
+    config = Config()
+    assert config.ingest.kind == "efd"
+    source = make_source(config)
+    assert isinstance(source, EfdTooAlertSource)
+    assert source.topic == EFD_TOPIC
+    assert source.database == EFD_DATABASE
+    assert source.lookback_s == 0.0, "a restart must not re-post recent alerts"
+
+
+def test_efd_settings_reach_the_source():
+    from chatterbox.ingest.efd import EfdTooAlertSource
+
+    config = Config()
+    config.ingest.efd_name = "usdf_efd"
+    config.ingest.efd_topic = "lsst.scimma.too_alert_test"
+    config.ingest.efd_poll_interval_s = 42.0
+    config.ingest.efd_lookback_s = 300.0
+    source = make_source(config)
+    assert isinstance(source, EfdTooAlertSource)
+    assert source.efd_name == "usdf_efd"
+    assert source.topic == "lsst.scimma.too_alert_test"
+    assert source.poll_interval_s == 42.0
+    assert source.lookback_s == 300.0
+
+
 def test_make_source_selects_by_kind(tmp_path):
     config = Config()
     config.ingest.kind = "files"

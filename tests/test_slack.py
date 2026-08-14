@@ -221,6 +221,73 @@ def test_sim_reply_includes_the_band_carousel_note(config):
     assert "SimpleBandSched" in block_text(build_sim_reply_blocks(result, config))
 
 
+# ------------------------------------------------------------------ failures
+
+
+def test_failure_blocks_name_what_broke_and_where():
+    from chatterbox.slackbot.blocks import build_failure_blocks
+
+    blocks = build_failure_blocks(
+        "handling a ToO record",
+        KeyError("reward_map"),
+        source="S251112cm",
+        origin="lsst.scimma.too_alert on summit_efd",
+        log_tail="Traceback (most recent call last):\n  boom",
+    )
+    text = render_blocks_as_text(blocks)
+    assert "handling a ToO record" in text
+    assert "S251112cm" in text
+    assert "lsst.scimma.too_alert on summit_efd" in text
+    assert "KeyError" in text, "the exception type is half the diagnosis"
+    assert "boom" in text
+
+
+def test_failure_blocks_are_valid_without_any_context():
+    """Decoding is one of the things that fails, so the id is often unknown."""
+    from chatterbox.slackbot.blocks import build_failure_blocks
+
+    blocks = build_failure_blocks("monitoring for ToO alerts (efd)", "influx is unreachable")
+    json.dumps(blocks)
+    assert blocks[0]["type"] == "header"
+    assert len(blocks[0]["text"]["text"]) <= 150
+    for block in blocks:
+        if block["type"] == "section":
+            assert len(block["text"]["text"]) <= 3000
+    assert "influx is unreachable" in render_blocks_as_text(blocks)
+
+
+def test_a_huge_traceback_does_not_produce_an_invalid_block():
+    from chatterbox.slackbot.blocks import build_failure_blocks
+
+    blocks = build_failure_blocks("simulating S1", RuntimeError("x" * 20_000), log_tail="y" * 20_000)
+    for block in blocks:
+        if block["type"] == "section":
+            assert len(block["text"]["text"]) <= 3000
+
+
+def test_posting_a_failure_never_raises(config):
+    """It is called from except blocks; it cannot add a second failure."""
+    from chatterbox.app import post_failure
+
+    class BrokenPoster:
+        def post(self, *args, **kwargs):
+            raise RuntimeError("Slack is down too")
+
+    assert post_failure("handling a ToO record", ValueError("first"), BrokenPoster()) is None
+    # And with no poster at all, as in a dry run.
+    assert post_failure("handling a ToO record", ValueError("first"), None) is None
+
+
+def test_a_failed_test_alert_goes_to_the_test_channel(config, tmp_path):
+    from chatterbox.app import post_failure
+
+    config.slack.test_channel = "#too-test"
+    poster = SlackPoster(config, dry_run=True, output_dir=tmp_path)
+    post_failure("handling a ToO record", ValueError("nope"), poster, source="S1", is_test=True)
+    payload = json.loads((tmp_path / "S1_failure.json").read_text())
+    assert payload["channel"] == "#too-test"
+
+
 # -------------------------------------------------------------------- poster
 
 

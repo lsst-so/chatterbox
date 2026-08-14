@@ -96,6 +96,19 @@ def neutrino_record(data_dir: Path) -> dict:
     return json.loads((data_dir / "neutrino.json").read_text())
 
 
+@pytest.fixture(autouse=True)
+def no_slack_token(monkeypatch):
+    """Make it impossible for the suite to post to a real channel.
+
+    ``run_service`` builds its own `SlackPoster` from the environment, so a
+    developer with ``SLACK_BOT_TOKEN`` exported would otherwise have tests --
+    including the ones that deliberately provoke failures -- posting to the
+    channel. Without a token the poster is offline and writes payloads to the
+    temporary work directory instead.
+    """
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+
+
 @pytest.fixture
 def config(tmp_path):
     """A Config pointing entirely at a temporary directory."""

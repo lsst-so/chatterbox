@@ -20,9 +20,28 @@ slack:
   mention: []
 
 ingest:
-  # kafka: subscribe to the ToO producer's output topic via hop-client.
+  # efd:    poll the EFD for new too_alert records (the default).
+  # kafka:  subscribe to the ToO producer's output topic via hop-client.
   # files:  watch a directory that forward_alerts.py's FileSender writes into.
-  kind: files
+  kind: efd
+
+  # Which EFD, and where in it. The alerts are in the lsst.scimma database,
+  # not the default one that holds the SAL topics, so the database is set
+  # explicitly on the client. Leave efd_name empty to let an RSP host pick its
+  # own default, which needs lsst.summit.utils.
+  efd_name: summit_efd     # summit_efd | usdf_efd | idf_efd | base_efd
+  efd_database: lsst.scimma
+  efd_topic: lsst.scimma.too_alert
+  # Each query spans every pixel column of the reward map (12,288 at nside 32),
+  # so it is not free -- poll less often than a directory scan.
+  efd_poll_interval_s: 10.0
+  # Seconds before startup the first query reaches back. 0 means "only alerts
+  # from now on". chatterbox keeps no record of what it has already posted, so
+  # anything inside this window is re-posted after a restart.
+  efd_lookback_s: 0.0
+  # Consecutive failed queries tolerated before the service reports the outage
+  # to Slack and stops. One failure is retried.
+  efd_max_consecutive_errors: 5
 
   # Topic names are deployment configuration -- there are none in the
   # rubin-ToO-producer repository -- so this must be filled in for kafka mode.
@@ -126,6 +145,11 @@ sim:
   # Resolution of the count maps. 256 is ~0.05 deg^2 per pixel, fine enough to
   # resolve the 1.75 deg field of view.
   nightly_plots_nside: 256
+  # One figure of coverage gained per night, per band, with the running any-band
+  # total drawn over it. Separate from nightly_plots: this is a single image
+  # whatever the run length, and it covers every night, including the ones the
+  # cap above leaves out.
+  nightly_coverage_plot: true
 
 paths:
   work_dir: ~/.chatterbox/work

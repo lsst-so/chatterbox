@@ -31,8 +31,11 @@ rubin = [
     "astroplan",
     "tables",
 ]
-# Alert transport. hop-client is only needed for the Kafka ingest source; the
-# file and replay sources work without it.
+# Alert transport. Each ingest source needs only its own extra; the file and
+# replay sources need neither.
+efd = [
+    "lsst-efd-client",
+]
 kafka = [
     "hop-client>=0.11.0",
     "fastavro",

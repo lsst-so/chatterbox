@@ -2,9 +2,12 @@
 
 ``forward_alerts.py`` can emit through four senders (stdout, files, Kafka via
 hop, and the Confluent REST proxy), so chatterbox supports the two that a
-downstream consumer can realistically attach to, plus a replay source for
-testing:
+downstream consumer can realistically attach to, plus the EFD, where the same
+records are archived, plus a replay source for testing:
 
+- `chatterbox.ingest.efd.EfdTooAlertSource` polls the EFD's ``lsst.scimma``
+  database for new ``too_alert`` records. This is the default: it needs no
+  broker subscription, and it is how the records are read on-site.
 - `KafkaTooAlertSource` subscribes to the producer's output topic with
   hop-client, which is required because the producer frames records as
   ``hop.models.AvroBlob`` and adds its own headers.
@@ -245,6 +248,18 @@ def make_source(config: Config, paths=None) -> TooAlertSource:
 
     ingest: IngestConfig = config.ingest
     kind = ingest.kind.lower()
+    if kind == "efd":
+        # Imported here: the EFD source imports this module for the base class.
+        from .efd import EfdTooAlertSource
+
+        return EfdTooAlertSource(
+            efd_name=ingest.efd_name,
+            database=ingest.efd_database,
+            topic=ingest.efd_topic,
+            poll_interval_s=ingest.efd_poll_interval_s,
+            lookback_s=ingest.efd_lookback_s,
+            max_consecutive_errors=ingest.efd_max_consecutive_errors,
+        )
     if kind == "kafka":
         return KafkaTooAlertSource(
             url=ingest.kafka_url,
@@ -255,4 +270,4 @@ def make_source(config: Config, paths=None) -> TooAlertSource:
         return FileTooAlertSource(ingest.watch_dir, ingest.poll_interval_s)
     if kind == "replay":
         raise ValueError("ingest.kind='replay' requires explicit paths")
-    raise ValueError(f"Unknown ingest.kind {ingest.kind!r}; expected 'kafka', 'files' or 'replay'")
+    raise ValueError(f"Unknown ingest.kind {ingest.kind!r}; expected 'efd', 'kafka', 'files' or 'replay'")

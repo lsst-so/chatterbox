@@ -29,7 +29,7 @@ import numpy as np
 
 logger = logging.getLogger("chatterbox.sim.driver")
 
-__all__ = ["main", "run_job"]
+__all__ = ["main", "run_job", "day_obs_for"]
 
 
 def _band_scheduler(spec: dict[str, Any]) -> tuple[Any, str]:
@@ -78,6 +78,73 @@ def _band_scheduler(spec: dict[str, Any]) -> tuple[Any, str]:
     )
 
 
+def day_obs_for(event_mjd: float) -> int:
+    """The observing night a trigger belongs to, as an integer ``day_obs``.
+
+    A Rubin observing day runs from **12:00 UTC to 12:00 UTC**, which is what
+    keeps a whole Chilean night under one number: local midnight falls in the
+    middle of it, not on a boundary. Taking the trigger's UTC calendar date
+    instead splits the night in half, so an alert arriving between 00:00 and
+    12:00 UTC -- the second half of the night at Cerro Pachon, when a fast
+    response matters most -- names the *following* evening and delays the whole
+    simulated follow-up by a day.
+
+    ``rubin_nights`` owns this convention, so it is used when importable and
+    reimplemented only as a fallback.
+
+    Parameters
+    ----------
+    event_mjd : `float`
+        Trigger time.
+
+    Returns
+    -------
+    day_obs : `int`
+        ``YYYYMMDD``.
+    """
+    from astropy.time import Time
+
+    when = Time(float(event_mjd), format="mjd", scale="utc")
+    try:
+        from rubin_nights import dayobs_utils
+
+        return int(dayobs_utils.time_to_day_obs_int(when))
+    except Exception as exc:
+        logger.debug("Using the local day_obs convention (%s)", exc)
+        return int(Time(np.floor(when.mjd - 0.5), format="mjd", scale="utc").strftime("%Y%m%d"))
+
+
+def _trigger_night(observatory: Any, event_mjd: float) -> int | None:
+    """Which simulation night the trigger falls on.
+
+    ``ModelObservatory`` labels every observation with
+    ``floor(mjd - mjd_start)`` -- a plain day count, *not* an almanac sunset
+    lookup -- so the same expression is the only thing guaranteed to agree with
+    the ``night`` column the visits carry. ``mjd_start`` is a noon-UTC epoch,
+    which puts the boundary at 12:00 UTC: the same convention as `day_obs_for`,
+    so an entire Chilean night shares one number and a daytime trigger already
+    belongs to the night that follows it.
+
+    Parameters
+    ----------
+    observatory : `object`
+        The ``ModelObservatory`` the simulation ran with.
+    event_mjd : `float`
+        Trigger time.
+
+    Returns
+    -------
+    night : `int` or None
+        None when the observatory cannot be read, in which case nights are
+        reported as bare survey nights rather than guessed at.
+    """
+    try:
+        return int(np.floor(float(event_mjd) - float(observatory.mjd_start)))
+    except Exception as exc:
+        logger.warning("Could not work out which night the trigger fell on: %s", exc)
+        return None
+
+
 def run_job(job_dir: Path) -> dict[str, Any]:
     """Run the simulation described by ``job.json`` in `job_dir`.
 
@@ -117,6 +184,7 @@ def run_job(job_dir: Path) -> dict[str, Any]:
     from ..astro.skymap import localization_from_probability, localization_from_reward_map
     from .coverage import (
         band_coverage_by_epoch,
+        coverage_by_night,
         coverage_curve,
         nightly_visit_maps,
         too_visits,
@@ -159,7 +227,11 @@ def run_job(job_dir: Path) -> dict[str, Any]:
     )
     too_server = SimTargetooServer([too])
 
-    day_obs = int(Time(event_mjd, format="mjd").strftime("%Y%m%d"))
+    # The trigger's own observing night, not its UTC calendar date: see
+    # `day_obs_for`. The simulation therefore starts at the beginning of the
+    # night the alert arrived in, so the follow-up can begin as soon as the
+    # scheduler is served the target.
+    day_obs = day_obs_for(event_mjd)
     logger.info(
         "Simulating %s (%s) for %d nights from day_obs=%d, footprint %d pixels",
         source,
@@ -257,6 +329,25 @@ def run_job(job_dir: Path) -> dict[str, Any]:
     visits = pd.DataFrame(observations)
     result["visits_path"] = str(visits_path)
     result["total_visits"] = int(len(visits))
+
+    # Anchor for every night number that reaches a reader, recorded next to the
+    # relative numbers so a survey night can still be recovered. The two should
+    # agree: the run starts on the trigger's own observing night. A mismatch
+    # means the start drifted from the alert, which is worth saying out loud
+    # rather than quietly relabelling.
+    trigger_night = _trigger_night(observatory, event_mjd)
+    result["trigger_night"] = trigger_night
+    if "night" in visits.columns and len(visits):
+        first = int(pd.to_numeric(visits["night"], errors="coerce").min())
+        result["first_sim_night"] = first
+        if trigger_night is not None and first != trigger_night:
+            logger.warning(
+                "The simulation's first night (%d) is not the trigger's night (%d); "
+                "nights are reported as %+d relative to the trigger",
+                first,
+                trigger_night,
+                first - trigger_night,
+            )
     result["archive_visits"] = int(len(combined))
     result["job_dir"] = str(job_dir)
 
@@ -312,7 +403,32 @@ def run_job(job_dir: Path) -> dict[str, Any]:
     except Exception as exc:
         logger.warning("Could not render the coverage curve: %s", exc)
 
-    # ------------------------------------------------------- nightly coverage
+    # --------------------------------------------------- coverage by night
+
+    # The same ToO visits the headline numbers come from, split by night, so
+    # the last cumulative value on the figure is the "any band" total in the
+    # threaded reply. Every night is included, even those the per-night maps
+    # below leave out under their cap.
+    if sim_cfg.get("nightly_coverage_plot", True):
+        try:
+            from ..plots.nightly_coverage import plot_coverage_by_night
+
+            nightly_coverage = coverage_by_night(follow_up, localization, reference_night=trigger_night)
+            result["coverage_by_night"] = nightly_coverage.as_dict()
+            result["cumulative_by_night"] = nightly_coverage.cumulative_any_band()
+            night_plot = plot_coverage_by_night(
+                nightly_coverage,
+                localization,
+                job_dir / "coverage_by_night.png",
+                source=source,
+                alert_type=alert_type,
+            )
+            if night_plot is not None:
+                result["nightly_coverage_plot"] = str(night_plot)
+        except Exception as exc:
+            logger.warning("Could not render the per-night coverage: %s", exc)
+
+    # ----------------------------------------------------- per-night maps
 
     # Deliberately every visit overlapping the localization, not just the
     # tagged ToO follow-up: nominal-cadence visits landing on the contour
@@ -339,6 +455,7 @@ def run_job(job_dir: Path) -> dict[str, Any]:
                     source=source,
                     alert_type=alert_type,
                     max_nights=int(sim_cfg.get("nightly_plots_max_nights", 10)),
+                    reference_night=trigger_night,
                 )
                 result["nightly_plots"] = [str(p) for p in paths]
                 result["nightly_plot_nights"] = plotted

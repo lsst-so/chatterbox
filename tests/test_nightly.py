@@ -273,6 +273,93 @@ def test_plot_of_no_nights_is_not_an_error(tmp_path):
     assert paths == [] and nights == [] and total == 0
 
 
+def test_per_night_coverage_figure_is_written(tmp_path):
+    from chatterbox.plots.nightly_coverage import plot_coverage_by_night
+    from chatterbox.sim.coverage import coverage_by_night
+
+    localization = disc_localization(radius=4.0, graded=True)
+    visits = pd.concat(
+        [
+            visit_rows([(59.0, -35.0)], band="g", night=3),
+            visit_rows([(61.0, -35.0)], band="r", night=4),
+            visit_rows([(60.0, -33.0)], band="i", night=9),
+        ],
+        ignore_index=True,
+    )
+    nightly = coverage_by_night(visits, localization)
+    assert nightly.nights == [3, 4, 9]
+
+    path = plot_coverage_by_night(
+        nightly, localization, tmp_path / "coverage_by_night.png", source="S1", alert_type="GW_case_B"
+    )
+    assert path is not None and path.is_file()
+    assert path.stat().st_size > 10_000
+
+
+def test_a_long_run_still_produces_one_figure(tmp_path):
+    """One image however long the run: no cap applies to this figure."""
+    from chatterbox.plots.nightly_coverage import plot_coverage_by_night
+    from chatterbox.sim.coverage import coverage_by_night
+
+    localization = disc_localization(radius=6.0, graded=True)
+    visits = pd.concat(
+        [visit_rows([(58.0 + 0.4 * n, -35.0)], band="g", night=n) for n in range(1, 51)],
+        ignore_index=True,
+    )
+    nightly = coverage_by_night(visits, localization)
+    assert len(nightly.nights) == 50
+    path = plot_coverage_by_night(nightly, localization, tmp_path / "long.png", source="S1")
+    assert path is not None and path.is_file()
+
+
+def test_the_coverage_figure_counts_from_the_trigger(tmp_path):
+    """Survey night 11 means nothing to a reader; "+0" and "-1" do."""
+    from chatterbox.plots.nightly_coverage import plot_coverage_by_night
+    from chatterbox.sim.coverage import coverage_by_night
+
+    localization = disc_localization(radius=4.0, graded=True)
+    visits = pd.concat(
+        [visit_rows([(59.0 + 0.5 * n, -35.0)], band="g", night=n) for n in (11, 12, 13)],
+        ignore_index=True,
+    )
+    nightly = coverage_by_night(visits, localization, reference_night=12)
+    assert nightly.labels() == ["-1", "+0", "+1"]
+
+    path = plot_coverage_by_night(nightly, localization, tmp_path / "rel.png", source="S1")
+    assert path is not None and path.stat().st_size > 10_000
+
+
+def test_the_map_title_names_both_countings(tmp_path):
+    """The relative night is what to read; the survey night finds visits."""
+    from chatterbox.plots.nightly import plot_all_nights
+
+    visits = pd.concat(
+        [visit_rows([(60.0, -35.0)], band="g", night=n) for n in (11, 12, 14)],
+        ignore_index=True,
+    )
+    maps = nightly_visit_maps(visits, nside=NSIDE)
+    paths, nights, _ = plot_all_nights(
+        maps,
+        disc_localization(graded=True),
+        tmp_path,
+        source="S1",
+        max_nights=0,
+        reference_night=12,
+    )
+    assert nights == [11, 12, 14]
+    # Filenames keep the survey night, so a figure still matches the opsim.
+    assert [p.name for p in paths] == [f"S1_night{n:03d}_visits.png" for n in (11, 12, 14)]
+
+
+def test_per_night_coverage_figure_of_nothing_is_not_an_error(tmp_path):
+    from chatterbox.plots.nightly_coverage import plot_coverage_by_night
+    from chatterbox.sim.coverage import NightlyCoverage
+
+    path = plot_coverage_by_night(NightlyCoverage(), disc_localization(), tmp_path / "empty.png")
+    assert path is None
+    assert not (tmp_path / "empty.png").exists()
+
+
 # --------------------------------------------------------------------- message
 
 
@@ -290,6 +377,14 @@ def sim_result(**overrides):
         job_dir="/sdf/home/s/seanmacb/.chatterbox/work/sim/S251112cm_20260814T173913",
         visits_path="/sdf/home/s/seanmacb/.chatterbox/work/sim/S251112cm_20260814T173913/visits.db",
         curve_plot="/sdf/home/s/seanmacb/.chatterbox/work/sim/S251112cm_20260814T173913/coverage.png",
+        nightly_coverage_plot=(
+            "/sdf/home/s/seanmacb/.chatterbox/work/sim/S251112cm_20260814T173913/coverage_by_night.png"
+        ),
+        # Keyed by nights since the trigger; survey night 11 is the trigger.
+        trigger_night=11,
+        first_sim_night=11,
+        coverage_by_night={"0": {"g": 0.13}, "1": {"r": 0.15, "i": 0.02}},
+        cumulative_by_night={"0": 0.13, "1": 0.28},
         nightly_plots=["/tmp/a.png", "/tmp/b.png"],
         nightly_plot_nights=[11, 12],
         nights_with_overlap=20,
@@ -311,7 +406,8 @@ def test_message_names_the_run_directory(config):
 def test_message_states_the_selection_rule(config):
     text = render_blocks_as_text(build_sim_figures_blocks(sim_result(), config))
     assert "overlap the localization contour" in text
-    assert "Nights shown: 11, 12" in text
+    assert "counted from the trigger night: +0, +1" in text
+    assert "survey nights 11-12" in text, "the absolute night stays findable"
 
 
 def test_message_distinguishes_too_from_nominal_cadence(config):
@@ -400,15 +496,31 @@ def test_the_curve_travels_with_the_nightly_maps(config):
     result = sim_result()
     figures = sim_figures(result)
     assert figures[0] == result.curve_plot, "the cumulative curve reads first"
-    assert figures[1:] == result.nightly_plots
+    assert figures[1] == result.nightly_coverage_plot, "then the same total, night by night"
+    assert figures[2:] == result.nightly_plots
     text = render_blocks_as_text(build_sim_figures_blocks(result, config))
     assert "Cumulative coverage" in text
+
+
+def test_the_figure_message_numbers_what_it_carries(config):
+    """Three figures, three lines, in the order they are uploaded."""
+    text = render_blocks_as_text(build_sim_figures_blocks(sim_result(), config))
+    assert "1. Cumulative coverage" in text
+    assert "2. The same coverage night by night" in text
+    assert "3. Per-band visit counts" in text
+
+    # Numbering follows what is actually there, so a missing curve does not
+    # leave the reader looking for a figure 1 that was never uploaded.
+    text = render_blocks_as_text(build_sim_figures_blocks(sim_result(curve_plot=None), config))
+    assert "1. The same coverage night by night" in text
+    assert "2. Per-band visit counts" in text
 
 
 def test_figures_are_empty_when_nothing_rendered(config):
     from chatterbox.slackbot.blocks import sim_figures
 
-    assert sim_figures(sim_result(curve_plot=None, nightly_plots=[])) == []
+    bare = sim_result(curve_plot=None, nightly_coverage_plot=None, nightly_plots=[])
+    assert sim_figures(bare) == []
 
 
 def test_the_coverage_reply_says_where_the_figures_went(config):
@@ -418,10 +530,75 @@ def test_the_coverage_reply_says_where_the_figures_went(config):
     text = render_blocks_as_text(build_sim_reply_blocks(sim_result(), config))
     assert "thread of its own" in text
     # And per-epoch coverage is not lost when that line is added.
-    bare = sim_result(curve_plot=None, nightly_plots=[], coverage_by_epoch={"0": {"g": 0.3}})
+    bare = sim_result(
+        curve_plot=None,
+        nightly_coverage_plot=None,
+        nightly_plots=[],
+        coverage_by_epoch={"0": {"g": 0.3}},
+    )
     text = render_blocks_as_text(build_sim_reply_blocks(bare, config))
     assert "thread of its own" not in text
     assert "epoch 0: g 30%" in text
+
+
+def test_the_reply_carries_the_night_by_night_progression(config):
+    """Readable without opening an image, which is how threads get read."""
+    from chatterbox.slackbot.blocks import build_sim_reply_blocks
+
+    text = render_blocks_as_text(build_sim_reply_blocks(sim_result(), config))
+    assert "Per night" in text
+    assert "n+0 13% → n+1 28%" in text
+
+
+def test_a_long_run_elides_the_middle_nights_not_the_end(config):
+    """The last number is the total, so it must survive any shortening."""
+    from chatterbox.slackbot.blocks import build_sim_reply_blocks
+
+    cumulative = {str(n): 0.02 * n for n in range(1, 41)}
+    result = sim_result(cumulative_by_night=cumulative)
+    text = render_blocks_as_text(build_sim_reply_blocks(result, config))
+    assert "n+1 2%" in text
+    assert "..." in text
+    assert "n+40 80%" in text
+
+
+def test_a_pre_trigger_night_is_explained_not_just_labelled(config):
+    """A negative night would otherwise read as a mislabelled first epoch."""
+    result = sim_result(nightly_plot_nights=[11, 12], trigger_night=12)
+    text = render_blocks_as_text(build_sim_figures_blocks(result, config))
+    assert "counted from the trigger night: -1, +0" in text
+    assert "A negative night is *before* the trigger" in text
+    assert "nominal cadence, not follow-up" in text
+
+
+def test_no_pre_trigger_note_when_the_run_starts_on_the_trigger(config):
+    result = sim_result(nightly_plot_nights=[12, 13], trigger_night=12)
+    text = render_blocks_as_text(build_sim_figures_blocks(result, config))
+    assert "counted from the trigger night: +0, +1" in text
+    assert "negative night" not in text
+
+
+def test_an_unanchored_result_still_renders_survey_nights(config):
+    """A result.json written before the anchor existed must not break."""
+    from chatterbox.slackbot.blocks import build_sim_reply_blocks
+
+    result = sim_result(
+        trigger_night=None,
+        nightly_plot_nights=[11, 12],
+        cumulative_by_night={"11": 0.13, "12": 0.28},
+    )
+    text = render_blocks_as_text(build_sim_figures_blocks(result, config))
+    assert "Nights shown: 11, 12" in text
+    reply = render_blocks_as_text(build_sim_reply_blocks(result, config))
+    assert "n11 13% → n12 28%" in reply
+    assert "counted from the trigger" not in reply
+
+
+def test_the_reply_omits_the_night_line_when_there_is_nothing_to_show(config):
+    from chatterbox.slackbot.blocks import build_sim_reply_blocks
+
+    text = render_blocks_as_text(build_sim_reply_blocks(sim_result(cumulative_by_night={}), config))
+    assert "Per night" not in text
 
 
 class RecordingPoster:
@@ -457,7 +634,14 @@ def test_post_sim_results_posts_the_figures(config):
 
     assert len(poster.replies) == 1, "coverage belongs in the alert's thread"
     assert len(poster.posts) == 1, "the figures belong in a message of their own"
-    assert poster.posts[0]["files"] == [result.curve_plot] + result.nightly_plots
+    assert (
+        poster.posts[0]["files"]
+        == [
+            result.curve_plot,
+            result.nightly_coverage_plot,
+        ]
+        + result.nightly_plots
+    )
     assert poster.posts[0]["label"] == "S251112cm_figures"
     # No figure rides in the alert's thread; they are all in the other message.
     assert poster.replies[0]["files"] is None
@@ -513,7 +697,8 @@ def test_dry_run_writes_both_payloads(config, tmp_path):
         plots.append(str(path))
 
     poster = SlackPoster(config, dry_run=True, output_dir=tmp_path)
-    post_sim_results(sim_result(curve_plot=None, nightly_plots=plots), config, poster)
+    result = sim_result(curve_plot=None, nightly_coverage_plot=None, nightly_plots=plots)
+    post_sim_results(result, config, poster)
 
     assert (tmp_path / "S251112cm_sim.json").is_file()
     figures = json.loads((tmp_path / "S251112cm_figures.json").read_text())
@@ -563,6 +748,52 @@ def test_test_alerts_route_both_messages(config):
     recorder.post = capture
     post_sim_results(sim_result(), config, recorder, is_test=True)
     assert calls == [True, True]
+
+
+def test_a_simulation_that_never_wrote_a_result_says_so_in_the_channel(config, monkeypatch, tmp_path):
+    """The driver crashing must not leave the thread silently stopping."""
+    from types import SimpleNamespace
+
+    from chatterbox import app
+
+    job = SimpleNamespace(
+        job_dir=tmp_path,
+        wait=lambda timeout=None: 1,
+        tail_log=lambda lines=20: "MemoryError: the sim ran out of memory",
+    )
+    monkeypatch.setattr(app, "launch_simulation", lambda trigger, cfg: job)
+    monkeypatch.setattr(app, "load_sim_result", lambda job_dir: None)
+
+    poster = RecordingPoster()
+    trigger = SimpleNamespace(source="S251112cm", is_test=False)
+    app._start_simulation(trigger, config, poster, SimpleNamespace(posted=None), sim_wait=True)
+
+    assert [p["label"] for p in poster.posts] == ["S251112cm_failure"]
+    text = json.dumps(poster.posts[0]["blocks"])
+    assert "no result.json" in text
+    assert "ran out of memory" in text, "the log tail is what makes it actionable"
+
+
+def test_a_crash_in_the_posting_thread_is_reported(config, monkeypatch, tmp_path):
+    """An exception in a background thread is otherwise invisible."""
+    from types import SimpleNamespace
+
+    from chatterbox import app
+
+    job = SimpleNamespace(job_dir=tmp_path, wait=lambda timeout=None: 0, tail_log=lambda lines=20: "")
+    monkeypatch.setattr(app, "launch_simulation", lambda trigger, cfg: job)
+
+    def explode(job_dir):
+        raise OSError("result.json is unreadable")
+
+    monkeypatch.setattr(app, "load_sim_result", explode)
+
+    poster = RecordingPoster()
+    trigger = SimpleNamespace(source="S251112cm", is_test=False)
+    app._start_simulation(trigger, config, poster, SimpleNamespace(posted=None), sim_wait=True)
+
+    assert [p["label"] for p in poster.posts] == ["S251112cm_failure"]
+    assert "result.json is unreadable" in json.dumps(poster.posts[0]["blocks"])
 
 
 # ------------------------------------------------------- surviving the process
@@ -659,11 +890,16 @@ def finished_job_dir(tmp_path, **overrides):
     """A job directory as the driver leaves it, with real figure files."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     figures = []
-    for name in ("coverage.png", "S251112cm_night011_visits.png"):
+    for name in ("coverage.png", "coverage_by_night.png", "S251112cm_night011_visits.png"):
         path = tmp_path / name
         path.write_bytes(b"x")
         figures.append(str(path))
-    result = sim_result(curve_plot=figures[0], nightly_plots=figures[1:], **overrides)
+    result = sim_result(
+        curve_plot=figures[0],
+        nightly_coverage_plot=figures[1],
+        nightly_plots=figures[2:],
+        **overrides,
+    )
     (tmp_path / "result.json").write_text(json.dumps(result.__dict__))
     return tmp_path, figures
 

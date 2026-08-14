@@ -38,6 +38,7 @@ from .plots.darkhours import plot_dark_hours, region_hours_summary
 from .plots.templates import plot_template_coverage
 from .sim.runner import SimResult, launch_simulation, load_sim_result
 from .slackbot.blocks import (
+    build_failure_blocks,
     build_sim_figures_blocks,
     build_sim_reply_blocks,
     build_trigger_blocks,
@@ -50,6 +51,7 @@ __all__ = [
     "TriggerReport",
     "process_trigger",
     "post_sim_results",
+    "post_failure",
     "drain_simulations",
     "run_service",
 ]
@@ -351,6 +353,60 @@ def post_sim_results(
     return sent
 
 
+def post_failure(
+    what: str,
+    error: BaseException | str,
+    poster: SlackPoster | None,
+    source: str = "",
+    origin: str = "",
+    log_tail: str = "",
+    is_test: bool = False,
+) -> PostedMessage | None:
+    """Tell the channel that chatterbox failed. Never raises.
+
+    The whole point is to be reached from an ``except`` block, so it cannot add
+    a second failure on top of the first: everything here, including building
+    the blocks, is inside its own guard.
+
+    Parameters
+    ----------
+    what : `str`
+        What was being attempted, as a phrase.
+    error : `BaseException` or `str`
+        The failure to report.
+    poster : `SlackPoster` or None
+        Delivery. None -- a dry run with no poster -- logs and returns.
+    source : `str`
+        Event identifier, when known.
+    origin : `str`
+        Where the record came from.
+    log_tail : `str`
+        Last lines of a relevant log.
+    is_test : `bool`
+        Route to the test channel, when one is configured.
+
+    Returns
+    -------
+    posted : `PostedMessage` or None
+        None when there was no poster, or when posting the failure also failed.
+    """
+    logger.error("Failure while %s (%s): %s", what, source or "no event", error, exc_info=True)
+    if poster is None:
+        return None
+    label = f"{source or 'chatterbox'}_failure"
+    try:
+        blocks = build_failure_blocks(what, error, source=source, origin=origin, log_tail=log_tail)
+        summary = f"chatterbox failed while {what}"
+        if source:
+            summary += f" ({source})"
+        return poster.post(blocks, summary, is_test=is_test, label=label)
+    except Exception as exc:
+        # Nothing left to do but say so in the log: the channel is exactly what
+        # is not working.
+        logger.error("Could not post the failure notice either: %s", exc)
+        return None
+
+
 def _start_simulation(
     trigger: Trigger,
     config: Config,
@@ -365,28 +421,49 @@ def _start_simulation(
     report.sim_job = job
 
     def finish() -> None:
-        job.wait(timeout=config.sim.timeout_s)
-        result = load_sim_result(job.job_dir)
-        if result is None:
-            logger.error(
-                "Simulation for %s produced no result.json. Log tail:\n%s",
-                trigger.source,
-                job.tail_log(),
+        # This runs in a background thread, where an uncaught exception is
+        # invisible: it kills the thread, the interpreter says nothing, and the
+        # symptom is a simulation that never posts.
+        try:
+            job.wait(timeout=config.sim.timeout_s)
+            result = load_sim_result(job.job_dir)
+            if result is None:
+                # The driver died before writing a result, so there is nothing
+                # to build a coverage post from. Say so in the channel: the
+                # alert's thread otherwise just stops.
+                post_failure(
+                    f"simulating {trigger.source}",
+                    f"the simulation produced no result.json in {job.job_dir}",
+                    poster,
+                    source=trigger.source,
+                    origin=str(job.job_dir),
+                    log_tail=job.tail_log(),
+                    is_test=trigger.is_test,
+                )
+                return
+            logger.info("Simulation for %s finished with status %s", trigger.source, result.status)
+            if poster is None:
+                return
+            # `report.posted` is None in a dry run, and when stage 1 could not
+            # be posted. Neither is a reason to throw the simulation away, so
+            # the results still go out -- standalone rather than threaded.
+            post_sim_results(
+                result,
+                config,
+                poster,
+                parent=report.posted,
+                is_test=trigger.is_test,
             )
-            return
-        logger.info("Simulation for %s finished with status %s", trigger.source, result.status)
-        if poster is None:
-            return
-        # `report.posted` is None in a dry run, and when stage 1 could not be
-        # posted. Neither is a reason to throw the simulation away, so the
-        # results still go out -- standalone rather than threaded.
-        post_sim_results(
-            result,
-            config,
-            poster,
-            parent=report.posted,
-            is_test=trigger.is_test,
-        )
+        except Exception as exc:
+            post_failure(
+                f"posting the simulation of {trigger.source}",
+                exc,
+                poster,
+                source=trigger.source,
+                origin=str(job.job_dir),
+                log_tail=job.tail_log(),
+                is_test=trigger.is_test,
+            )
 
     if sim_wait:
         finish()
@@ -423,6 +500,7 @@ def run_service(config: Config, paths=None, run_sim: bool = True) -> int:
     pending: list[TriggerReport] = []
     try:
         for record, metadata in source:
+            origin = metadata.get("origin") or metadata.get("topic") or metadata.get("transport") or ""
             try:
                 report = process_trigger(record, config, poster=poster, run_sim=run_sim)
                 pending = [r for r in pending if not r.wait_for_simulation(timeout=0)]
@@ -430,11 +508,18 @@ def run_service(config: Config, paths=None, run_sim: bool = True) -> int:
                     pending.append(report)
                 handled += 1
             except Exception as exc:
-                logger.error(
-                    "Failed to handle a record from %s: %s",
-                    metadata.get("origin") or metadata.get("topic"),
+                # A dropped alert must never be silent. `record` may not have
+                # decoded, so its fields are read defensively -- the identifier
+                # and the test flag are the two worth trying for.
+                identifier = record.get("source") if isinstance(record, dict) else None
+                is_test = bool(record.get("is_test")) if isinstance(record, dict) else False
+                post_failure(
+                    "handling a ToO record",
                     exc,
-                    exc_info=True,
+                    poster,
+                    source=str(identifier or ""),
+                    origin=str(origin),
+                    is_test=is_test,
                 )
             finally:
                 # Acknowledge either way: a record that cannot be processed
@@ -444,6 +529,17 @@ def run_service(config: Config, paths=None, run_sim: bool = True) -> int:
                 source.mark_done(metadata)
     except KeyboardInterrupt:
         logger.info("Interrupted; shutting down after %d record(s)", handled)
+    except Exception as exc:
+        # The stream itself failed -- the EFD went away, credentials expired,
+        # the broker dropped us. The service is about to stop consuming alerts,
+        # which is precisely the thing nobody would otherwise notice.
+        post_failure(
+            f"monitoring for ToO alerts ({config.ingest.kind})",
+            exc,
+            poster,
+            origin=str(config.ingest.kind),
+        )
+        raise
     finally:
         source.close()
         drain_simulations(pending)

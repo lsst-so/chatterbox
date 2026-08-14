@@ -31,12 +31,16 @@ __all__ = [
     "BANDS",
     "FOV_RADIUS_DEG",
     "CoverageResult",
+    "NightlyCoverage",
     "too_visits",
     "band_coverage",
     "band_coverage_by_epoch",
+    "coverage_by_night",
     "coverage_curve",
     "detect_pointing_columns",
     "detect_time_column",
+    "night_label",
+    "nights_since_trigger",
     "visits_overlapping",
     "nightly_visit_maps",
 ]
@@ -117,6 +121,118 @@ class CoverageResult:
         """One-line summary, e.g. ``"g 41%, r 62%, i 100%"``."""
         parts = [f"{b} {100 * v:.0f}%" for b, v in self.fractions.items() if v > 0]
         return ", ".join(parts) if parts else "no coverage"
+
+
+def nights_since_trigger(nights, reference_night: int | None) -> list[int]:
+    """Convert survey night indices to nights since the trigger.
+
+    ``night`` in a simulation output is `rubin_scheduler`'s *survey* night
+    counter, which counts from ``SURVEY_START_MJD`` and so has no relation to
+    when the alert fired -- a November 2025 event lands on night 11 or 12
+    whatever the follow-up looks like. Everything a reader cares about is
+    relative: night 0 is the trigger night, night 1 the one after it. Negative
+    values are real and worth seeing, since the simulation starts from the
+    trigger's ``day_obs`` and can therefore include the night *before* the
+    trigger, whose visits are nominal cadence rather than follow-up.
+
+    Parameters
+    ----------
+    nights : sequence of `int`
+        Survey night indices.
+    reference_night : `int` or None
+        Survey night the trigger fell on. None leaves the numbers alone, so a
+        result from before this was recorded still renders.
+
+    Returns
+    -------
+    relative : `list` [`int`]
+    """
+    if reference_night is None:
+        return [int(n) for n in nights]
+    return [int(n) - int(reference_night) for n in nights]
+
+
+def night_label(night: int, reference_night: int | None) -> str:
+    """Label one night: ``"+0"`` for the trigger night, ``"-1"`` before it.
+
+    Falls back to the bare survey night when there is no reference, so the
+    label is never silently ambiguous about which counting is in use.
+    """
+    if reference_night is None:
+        return str(int(night))
+    return f"{int(night) - int(reference_night):+d}"
+
+
+@dataclass
+class NightlyCoverage:
+    """Localization coverage broken down by simulation night.
+
+    Two views of the same run: how much each band *added* on each night, and
+    how much had been covered in total by the end of it. The last cumulative
+    value equals what `band_coverage` reports for the same visits, because both
+    zero a pixel once it has been counted.
+
+    Attributes
+    ----------
+    nights : `list` [`int`]
+        Survey nights with visits, in order. Nights with none are absent.
+    gained : `dict` [`str`, `list` [`float`]]
+        ``band -> fraction added on each night``, parallel to `nights`. Bands
+        with no visits anywhere are omitted.
+    cumulative : `dict` [`str`, `list` [`float`]]
+        ``band -> fraction covered through each night``.
+    any_band_gained, any_band_cumulative : `list` [`float`]
+        The same, counting a pixel once no matter which band reached it.
+    quantity : `str`
+        ``"probability"`` or ``"area"``, from the localization's provenance.
+    is_probability : `bool`
+        True when these are genuine probabilities.
+    reference_night : `int` or None
+        Survey night the trigger fell on, so `nights` can be reported relative
+        to it. Everything user-facing uses the relative numbers.
+    """
+
+    nights: list[int] = field(default_factory=list)
+    gained: dict[str, list[float]] = field(default_factory=dict)
+    cumulative: dict[str, list[float]] = field(default_factory=dict)
+    any_band_gained: list[float] = field(default_factory=list)
+    any_band_cumulative: list[float] = field(default_factory=list)
+    quantity: str = "area"
+    is_probability: bool = False
+    reference_night: int | None = None
+
+    @property
+    def relative_nights(self) -> list[int]:
+        """`nights`, counted from the trigger rather than the survey start."""
+        return nights_since_trigger(self.nights, self.reference_night)
+
+    def labels(self) -> list[str]:
+        """One label per night, e.g. ``["-1", "+0", "+1"]``."""
+        return [night_label(night, self.reference_night) for night in self.nights]
+
+    def as_dict(self) -> dict[str, dict[str, float]]:
+        """``night -> band -> fraction gained``, with JSON-ready keys.
+
+        Keyed by nights since the trigger, so ``"0"`` is the trigger night and
+        ``"-1"`` the night before. Add ``trigger_night`` from the result to
+        recover the survey night.
+        """
+        return {
+            str(night): {band: values[n] for band, values in self.gained.items() if values[n] > 0}
+            for n, night in enumerate(self.relative_nights)
+        }
+
+    def cumulative_any_band(self) -> dict[str, float]:
+        """``nights since trigger -> total fraction covered through it``."""
+        return {str(night): self.any_band_cumulative[n] for n, night in enumerate(self.relative_nights)}
+
+    def summary_line(self) -> str:
+        """One-line progression, e.g. ``"night +0: 13%, night +1: 28%"``."""
+        parts = [
+            f"night {label}: {100 * self.any_band_cumulative[n]:.0f}%"
+            for n, label in enumerate(self.labels())
+        ]
+        return ", ".join(parts) if parts else "no nights with visits"
 
 
 def too_visits(visits: pd.DataFrame, too_id: str | None = None) -> pd.DataFrame:
@@ -209,6 +325,28 @@ def _pointings(
     return ra[good], dec[good]
 
 
+def _paint(
+    working: np.ndarray,
+    ra_deg: np.ndarray,
+    dec_deg: np.ndarray,
+    nside: int,
+    radius_rad: float,
+) -> list[float]:
+    """Sum weight under a sequence of pointings, zeroing `working` as it goes.
+
+    The map is modified in place, so successive calls with the same map
+    continue where the last one stopped -- which is what makes a night-by-night
+    breakdown add up to the same total as one pass over every visit.
+    """
+    increments = []
+    for ra, dec in zip(ra_deg, dec_deg):
+        idx = hp.query_disc(nside, hp.ang2vec(ra, dec, lonlat=True), radius_rad, inclusive=True)
+        gained = float(working[idx].sum())
+        working[idx] = 0.0
+        increments.append(gained)
+    return increments
+
+
 def _accumulate(
     prob_map: np.ndarray,
     ra_deg: np.ndarray,
@@ -216,21 +354,13 @@ def _accumulate(
     nside: int,
     radius_rad: float,
 ) -> tuple[float, list[float]]:
-    """Sum weight under a sequence of pointings, zeroing as it goes.
+    """Sum weight under a sequence of pointings against a fresh copy.
 
     Returns the total and the per-visit increments, so a cumulative curve can
     be built without repeating the work.
     """
-    working = copy.deepcopy(prob_map)
-    increments = []
-    total = 0.0
-    for ra, dec in zip(ra_deg, dec_deg):
-        idx = hp.query_disc(nside, hp.ang2vec(ra, dec, lonlat=True), radius_rad, inclusive=True)
-        gained = float(working[idx].sum())
-        working[idx] = 0.0
-        total += gained
-        increments.append(gained)
-    return total, increments
+    increments = _paint(copy.deepcopy(prob_map), ra_deg, dec_deg, nside, radius_rad)
+    return float(sum(increments)), increments
 
 
 def band_coverage(
@@ -355,6 +485,127 @@ def band_coverage_by_epoch(
         per_epoch = band_coverage(subset, localization, **kwargs)
         result.epochs[int(epoch)] = per_epoch.fractions
     return result
+
+
+def coverage_by_night(
+    visits: pd.DataFrame,
+    localization: Localization,
+    fov_radius_deg: float = FOV_RADIUS_DEG,
+    bands: tuple[str, ...] = BANDS,
+    band_col: str = "band",
+    night_col: str = "night",
+    ra_col: str | None = None,
+    dec_col: str | None = None,
+    radians: bool | None = None,
+    reference_night: int | None = None,
+) -> NightlyCoverage:
+    """Coverage gained on each simulated night, per band.
+
+    `coverage_curve` answers "how much, by when" against wall-clock time;
+    this answers "how much did each night buy", on the same night index the
+    per-night visit maps are labelled with. Both totals agree with
+    `band_coverage` because all three zero a pixel once it is counted.
+
+    Parameters
+    ----------
+    visits : `pandas.DataFrame`
+        Visits to account for. Pass the output of `too_visits` so the totals
+        match the coverage reported for the run.
+    localization : `Localization`
+        Localization to integrate.
+    fov_radius_deg : `float`
+        Field-of-view radius painted around each pointing.
+    bands : `tuple` [`str`]
+        Bands to consider.
+    band_col, night_col : `str`
+        Column names. ``night`` is the simulation's own night index.
+    ra_col, dec_col, radians : optional
+        Pointing columns and units, detected when omitted.
+    reference_night : `int`, optional
+        Survey night the trigger fell on, so the result can report nights
+        relative to it. See `nights_since_trigger`.
+
+    Returns
+    -------
+    nightly : `NightlyCoverage`
+        Empty when no visit carries a usable night.
+    """
+    if night_col not in visits.columns:
+        raise KeyError(f"Visit table has no {night_col!r} column; have {sorted(visits.columns)[:20]}...")
+
+    if ra_col is None or dec_col is None:
+        detected_ra, detected_dec, detected_radians = detect_pointing_columns(visits)
+        ra_col = ra_col or detected_ra
+        dec_col = dec_col or detected_dec
+        if radians is None:
+            radians = detected_radians
+    elif radians is None:
+        radians = True
+
+    prob_map = np.asarray(localization.prob_map, dtype=float)
+    nside = localization.nside
+    radius = np.radians(fov_radius_deg)
+
+    # A night that cannot be read as a number cannot be placed on the axis, so
+    # those rows are dropped rather than lumped into some arbitrary night.
+    night_values = pd.to_numeric(visits[night_col], errors="coerce")
+    usable = visits.loc[night_values.notna()]
+    if usable.empty:
+        logger.warning("No visits carry a usable %r; skipping the per-night breakdown", night_col)
+        return NightlyCoverage(
+            quantity=localization.quantity_name,
+            is_probability=localization.is_probability,
+            reference_night=reference_night,
+        )
+    night_values = night_values.loc[usable.index].astype(int)
+    nights = sorted(int(n) for n in night_values.unique())
+    band_values = usable[band_col].astype(str) if band_col in usable.columns else None
+
+    def walk(rows: pd.DataFrame, row_nights: pd.Series) -> tuple[list[float], list[float]]:
+        """Gained and cumulative fractions over `nights`, in order."""
+        working = copy.deepcopy(prob_map)
+        gained, cumulative, running = [], [], 0.0
+        for night in nights:
+            subset = rows.loc[row_nights == night]
+            night_total = 0.0
+            if not subset.empty:
+                ra, dec = _pointings(subset, ra_col, dec_col, radians)
+                if ra.size:
+                    night_total = float(sum(_paint(working, ra, dec, nside, radius)))
+            running += night_total
+            gained.append(night_total)
+            cumulative.append(running)
+        return gained, cumulative
+
+    per_band_gained: dict[str, list[float]] = {}
+    per_band_cumulative: dict[str, list[float]] = {}
+    if band_values is not None:
+        for band in bands:
+            rows = usable.loc[band_values == band]
+            if rows.empty:
+                continue
+            gained, cumulative = walk(rows, night_values.loc[rows.index])
+            per_band_gained[band] = gained
+            per_band_cumulative[band] = cumulative
+
+    any_gained, any_cumulative = walk(usable, night_values)
+
+    nightly = NightlyCoverage(
+        nights=nights,
+        gained=per_band_gained,
+        cumulative=per_band_cumulative,
+        any_band_gained=any_gained,
+        any_band_cumulative=any_cumulative,
+        quantity=localization.quantity_name,
+        is_probability=localization.is_probability,
+        reference_night=reference_night,
+    )
+    logger.info(
+        "Coverage by night (%s): %s",
+        nightly.quantity,
+        nightly.summary_line(),
+    )
+    return nightly
 
 
 def visits_overlapping(

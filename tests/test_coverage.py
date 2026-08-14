@@ -7,13 +7,24 @@ import pytest
 from conftest import NSIDE, disc_reward_map
 
 from chatterbox.astro.skymap import localization_from_probability, localization_from_reward_map
-from chatterbox.sim.coverage import BANDS, band_coverage, band_coverage_by_epoch, coverage_curve, too_visits
+from chatterbox.sim.coverage import (
+    BANDS,
+    band_coverage,
+    band_coverage_by_epoch,
+    coverage_by_night,
+    coverage_curve,
+    too_visits,
+)
 
 NSIDE_MAP = 128
 
 
-def make_visits(pointings, band="g", epoch=0, mjd0=61265.0):
-    """Build a visit table as ``sim_runner`` writes it (RA/Dec radians)."""
+def make_visits(pointings, band="g", epoch=0, mjd0=61265.0, night=0, nights=None):
+    """Build a visit table as ``sim_runner`` writes it (RA/Dec radians).
+
+    ``nights`` assigns one night per pointing; ``night`` puts them all on the
+    same one.
+    """
     rows = []
     for n, (ra, dec) in enumerate(pointings):
         rows.append(
@@ -23,6 +34,7 @@ def make_visits(pointings, band="g", epoch=0, mjd0=61265.0):
                 "band": band,
                 "observation_reason": f"too_GW_case_B_C_0_i{epoch}",
                 "mjd": mjd0 + n / 1440.0,
+                "night": nights[n] if nights is not None else night,
             }
         )
     return pd.DataFrame(rows)
@@ -264,3 +276,168 @@ def test_summary_line_lists_only_covered_bands(point_localization):
 def test_as_percent(point_localization):
     result = band_coverage(make_visits([(60.0, -35.0)]), point_localization)
     assert result.as_percent()["g"] == pytest.approx(100.0 * result.fractions["g"])
+
+
+# ------------------------------------------------------------- by night
+
+
+@pytest.fixture
+def spread_localization():
+    """A localization wide enough that one visit cannot cover it all."""
+    prob = np.zeros(hp.nside2npix(NSIDE_MAP))
+    pixels = hp.query_disc(NSIDE_MAP, hp.ang2vec(60.0, -35.0, lonlat=True), np.radians(3.0), inclusive=True)
+    prob[pixels] = 1.0
+    return localization_from_probability(prob, provenance="test", credible_level=0.9)
+
+
+def test_nights_are_ordered_and_only_those_with_visits(spread_localization):
+    visits = make_visits([(59.0, -35.0), (61.0, -35.0), (60.0, -33.0)], nights=[12, 3, 12])
+    nightly = coverage_by_night(visits, spread_localization)
+    assert nightly.nights == [3, 12], "ordered, deduplicated, and night 4-11 absent"
+    assert len(nightly.any_band_gained) == len(nightly.any_band_cumulative) == 2
+
+
+def test_the_nights_add_up_to_the_total(spread_localization):
+    """The invariant that makes the figure checkable against the numbers.
+
+    Both zero a pixel once counted, so splitting the same visits by night must
+    not change the answer -- otherwise the last point on the per-night figure
+    would disagree with the coverage quoted in the thread.
+    """
+    visits = make_visits([(59.0, -35.0), (61.0, -35.0), (60.0, -33.0)], nights=[0, 1, 2])
+    nightly = coverage_by_night(visits, spread_localization)
+    total = band_coverage(visits, spread_localization)
+    assert nightly.any_band_cumulative[-1] == pytest.approx(total.any_band, rel=1e-9)
+    assert nightly.cumulative["g"][-1] == pytest.approx(total.fractions["g"], rel=1e-9)
+    assert sum(nightly.any_band_gained) == pytest.approx(total.any_band, rel=1e-9)
+
+
+def test_a_repeated_pointing_gains_nothing_on_the_second_night(spread_localization):
+    """Coverage is not re-earned: night 2 sees the same sky as night 1."""
+    visits = make_visits([(60.0, -35.0), (60.0, -35.0)], nights=[1, 2])
+    nightly = coverage_by_night(visits, spread_localization)
+    assert nightly.any_band_gained[0] > 0.05
+    assert nightly.any_band_gained[1] == pytest.approx(0.0, abs=1e-12)
+    assert nightly.any_band_cumulative[1] == pytest.approx(nightly.any_band_cumulative[0], rel=1e-9)
+
+
+def test_cumulative_coverage_never_decreases(spread_localization):
+    visits = make_visits([(59.0, -35.0), (60.0, -35.0), (61.0, -35.0)], nights=[1, 2, 3])
+    nightly = coverage_by_night(visits, spread_localization)
+    assert (np.diff(nightly.any_band_cumulative) >= -1e-12).all()
+    assert all(gain >= -1e-12 for gain in nightly.any_band_gained)
+    assert nightly.any_band_cumulative[-1] <= 1.0 + 1e-9
+
+
+def test_bands_are_tracked_separately_by_night(spread_localization):
+    """Two bands on the same night each get their own copy of the map."""
+    visits = pd.concat(
+        [
+            make_visits([(60.0, -35.0)], band="g", night=1),
+            make_visits([(60.0, -35.0)], band="r", night=1),
+        ],
+        ignore_index=True,
+    )
+    nightly = coverage_by_night(visits, spread_localization)
+    assert set(nightly.gained) == {"g", "r"}, "unobserved bands are omitted, not zero-filled"
+    assert nightly.gained["g"][0] == pytest.approx(nightly.gained["r"][0], rel=1e-9)
+    # ...but the sky they share is counted once for the any-band total.
+    assert nightly.any_band_gained[0] == pytest.approx(nightly.gained["g"][0], rel=1e-9)
+
+
+def test_unusable_nights_are_dropped_not_lumped_together(spread_localization):
+    visits = make_visits([(60.0, -35.0), (61.0, -35.0)], nights=[1, 2])
+    visits.loc[1, "night"] = np.nan
+    nightly = coverage_by_night(visits, spread_localization)
+    assert nightly.nights == [1]
+
+
+def test_no_usable_night_is_empty_rather_than_an_error(spread_localization):
+    visits = make_visits([(60.0, -35.0)])
+    visits["night"] = np.nan
+    nightly = coverage_by_night(visits, spread_localization)
+    assert nightly.nights == []
+    assert nightly.as_dict() == {}
+    assert nightly.summary_line() == "no nights with visits"
+
+
+def test_the_night_column_is_required(spread_localization):
+    visits = make_visits([(60.0, -35.0)]).drop(columns=["night"])
+    with pytest.raises(KeyError, match="night"):
+        coverage_by_night(visits, spread_localization)
+
+
+def test_serialized_form_is_json_ready(spread_localization):
+    """result.json is the process boundary, so keys must be strings."""
+    import json
+
+    visits = make_visits([(59.0, -35.0), (61.0, -35.0)], nights=[4, 9])
+    nightly = coverage_by_night(visits, spread_localization)
+    as_dict = nightly.as_dict()
+    cumulative = nightly.cumulative_any_band()
+    assert list(as_dict) == ["4", "9"]
+    assert list(cumulative) == ["4", "9"]
+    assert as_dict["4"]["g"] > 0
+    json.dumps({"coverage_by_night": as_dict, "cumulative_by_night": cumulative})
+
+
+def test_quantity_is_carried_through(spread_localization):
+    """An area fraction must never be presented as a probability."""
+    visits = make_visits([(60.0, -35.0)], night=1)
+    assert coverage_by_night(visits, spread_localization).quantity == "probability"
+
+    area = localization_from_reward_map(disc_reward_map(60.0, -35.0, 3.0), NSIDE)
+    nightly = coverage_by_night(visits, area)
+    assert nightly.quantity == "area"
+    assert not nightly.is_probability
+
+
+# --------------------------------------------------- counting from the trigger
+
+
+def test_night_labels_count_from_the_trigger():
+    from chatterbox.sim.coverage import night_label, nights_since_trigger
+
+    assert nights_since_trigger([11, 12, 15], 12) == [-1, 0, 3]
+    assert night_label(12, 12) == "+0"
+    assert night_label(11, 12) == "-1"
+    assert night_label(19, 12) == "+7"
+
+
+def test_night_labels_fall_back_to_survey_nights():
+    """An older result.json has no anchor; it must still render."""
+    from chatterbox.sim.coverage import night_label, nights_since_trigger
+
+    assert nights_since_trigger([11, 12], None) == [11, 12]
+    assert night_label(11, None) == "11"
+
+
+def test_coverage_is_reported_relative_to_the_trigger(spread_localization):
+    visits = make_visits([(59.0, -35.0), (61.0, -35.0), (60.0, -33.0)], nights=[11, 12, 14])
+    nightly = coverage_by_night(visits, spread_localization, reference_night=12)
+
+    assert nightly.nights == [11, 12, 14], "the survey nights are kept"
+    assert nightly.relative_nights == [-1, 0, 2]
+    assert nightly.labels() == ["-1", "+0", "+2"]
+    assert list(nightly.as_dict()) == ["-1", "0", "2"]
+    assert list(nightly.cumulative_any_band()) == ["-1", "0", "2"]
+    assert "night +0" in nightly.summary_line()
+
+
+def test_a_pre_trigger_night_is_kept_not_discarded(spread_localization):
+    """The run starts from the trigger's day_obs, so it can start early.
+
+    Those visits are nominal cadence rather than follow-up, and they do cover
+    localization area, so they are reported -- as night -1, not as an epoch.
+    """
+    visits = make_visits([(60.0, -35.0), (61.0, -35.0)], nights=[11, 12])
+    nightly = coverage_by_night(visits, spread_localization, reference_night=12)
+    assert nightly.relative_nights[0] == -1
+    assert nightly.any_band_gained[0] > 0
+
+
+def test_without_an_anchor_the_survey_nights_are_reported(spread_localization):
+    visits = make_visits([(60.0, -35.0)], night=11)
+    nightly = coverage_by_night(visits, spread_localization)
+    assert nightly.reference_night is None
+    assert list(nightly.as_dict()) == ["11"]

@@ -164,11 +164,22 @@ CAPABILITIES: tuple[Capability, ...] = (
         extra="slack",
     ),
     Capability(
+        name="efd",
+        # Either one is enough: the summit helper picks the right instance for
+        # the host, the client needs to be told. Listing the client alone keeps
+        # the advice actionable off-RSP, where the helper cannot be installed.
+        modules=("lsst_efd_client",),
+        install="lsst-efd-client",
+        purpose="the EFD ingest source, which is the default monitoring path",
+        consequence="alerts cannot be read from the EFD; use ingest.kind 'kafka' or 'files'",
+        extra="efd",
+    ),
+    Capability(
         name="kafka",
         modules=("hop",),
         install="hop-client",
         purpose="the Kafka ingest source",
-        consequence="only the file and replay ingest sources work",
+        consequence="only the EFD, file and replay ingest sources work",
         extra="kafka",
     ),
     Capability(
