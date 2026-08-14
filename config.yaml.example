@@ -76,6 +76,9 @@ sim:
   # simulation runs as a subprocess, so this need not be the bot's own
   # interpreter.
   python: /sdf/group/rubin/sw/conda/bin/python 
+  # Checkout of lsst_survey_sim. It is added to sys.path, so this works whether
+  # the package is pip-installed or used from a clone. `refresh-opsim` needs it
+  # too, since the ConsDB fetch lives in that package.
   lsst_survey_sim: ~/Rubin-Observatory/lsst_survey_sim
   ts_config_scheduler: ~/Rubin-Observatory/ts_config_scheduler
   # Must be the tree containing sim_baseline.

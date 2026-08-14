@@ -186,6 +186,7 @@ def run_job(job_dir: Path) -> dict[str, Any]:
             tokenfile=sim_cfg.get("opsim_tokenfile") or None,
             site=sim_cfg.get("opsim_site", "usdf"),
             max_age_hours=float(sim_cfg.get("opsim_max_age_hours", 24.0)),
+            lsst_survey_sim=sim_cfg.get("lsst_survey_sim"),
         )
     except RuntimeError as exc:
         result["error"] = str(exc)

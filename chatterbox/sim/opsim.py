@@ -19,11 +19,18 @@ state is far better than no coverage estimate at all.
 
 import json
 import logging
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-__all__ = ["OpsimCache", "ensure_opsim", "fetch_opsim", "default_day_obs"]
+__all__ = [
+    "OpsimCache",
+    "OpsimToolUnavailableError",
+    "ensure_opsim",
+    "fetch_opsim",
+    "default_day_obs",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +122,53 @@ def _read_meta(path: Path) -> dict | None:
         return None
 
 
-def fetch_opsim(day_obs: int, tokenfile: str | None, site: str = "usdf"):
+class OpsimToolUnavailableError(RuntimeError):
+    """``lsst_survey_sim`` could not be imported, so no fetch is possible.
+
+    Kept distinct from a fetch that failed on the network or a token, because
+    the fix is completely different: this one is an environment problem.
+    """
+
+
+def _import_fetch_previous_visits(lsst_survey_sim: str | Path | None = None):
+    """Import the fetch tool, adding a checkout to ``sys.path`` if needed.
+
+    ``lsst_survey_sim`` is often used from a checkout rather than installed, so
+    the simulation subprocess gets its location on ``PYTHONPATH``. This runs
+    in-process (from ``chatterbox refresh-opsim``), so the same path has to be
+    added here or the import fails.
+    """
+    if lsst_survey_sim:
+        path = Path(lsst_survey_sim).expanduser()
+        if path.is_dir() and str(path) not in sys.path:
+            logger.debug("Adding %s to sys.path for the visit fetch", path)
+            sys.path.insert(0, str(path))
+
+    try:
+        from lsst_survey_sim.simulate_lsst import fetch_previous_visits
+    except ImportError as exc:
+        hint = (
+            f"sim.lsst_survey_sim points at {Path(lsst_survey_sim).expanduser()}, "
+            "which is not a directory. "
+            if lsst_survey_sim and not Path(lsst_survey_sim).expanduser().is_dir()
+            else ""
+        )
+        raise OpsimToolUnavailableError(
+            f"Cannot import lsst_survey_sim ({exc}), so the visit history cannot be "
+            f"fetched. {hint}"
+            "Set sim.lsst_survey_sim to a checkout of "
+            "https://github.com/lsst/lsst_survey_sim, or pip install it into the "
+            "interpreter running chatterbox."
+        ) from exc
+    return fetch_previous_visits
+
+
+def fetch_opsim(
+    day_obs: int,
+    tokenfile: str | None,
+    site: str = "usdf",
+    lsst_survey_sim: str | Path | None = None,
+):
     """Fetch the visit history from ConsDB with the scheduler's own tool.
 
     Parameters
@@ -126,13 +179,20 @@ def fetch_opsim(day_obs: int, tokenfile: str | None, site: str = "usdf"):
         RSP token file. None uses the ``ACCESS_TOKEN`` environment variable.
     site : `str`
         ConsDB site, which must match where the token came from.
+    lsst_survey_sim : `str` or `pathlib.Path`, optional
+        Checkout to add to ``sys.path`` when the package is not installed.
 
     Returns
     -------
     visits : `pandas.DataFrame` or None
         Opsim-formatted visits, or None when ConsDB has none.
+
+    Raises
+    ------
+    OpsimToolUnavailableError
+        If ``lsst_survey_sim`` cannot be imported.
     """
-    from lsst_survey_sim.simulate_lsst import fetch_previous_visits
+    fetch_previous_visits = _import_fetch_previous_visits(lsst_survey_sim)
 
     resolved = str(Path(tokenfile).expanduser()) if tokenfile else None
     logger.info("Fetching visits before day_obs %d from ConsDB at %s", day_obs, site)
@@ -146,6 +206,7 @@ def ensure_opsim(
     site: str = "usdf",
     max_age_hours: float = 24.0,
     force: bool = False,
+    lsst_survey_sim: str | Path | None = None,
 ) -> tuple["object", OpsimCache]:
     """Return the visit history, refreshing the cache when it is out of date.
 
@@ -163,6 +224,9 @@ def ensure_opsim(
         Refresh a cache older than this. ``0`` always refreshes.
     force : `bool`
         Refresh regardless of age.
+    lsst_survey_sim : `str` or `pathlib.Path`, optional
+        Checkout of ``lsst_survey_sim`` to add to ``sys.path``, for when it is
+        used from a clone rather than installed.
 
     Returns
     -------
@@ -175,6 +239,8 @@ def ensure_opsim(
     ------
     RuntimeError
         If the visits could not be fetched and no cache exists to fall back on.
+    OpsimToolUnavailableError
+        If ``lsst_survey_sim`` is not importable and there is no cache.
     """
     import pandas as pd
 
@@ -211,8 +277,15 @@ def ensure_opsim(
         return pd.read_parquet(cache_path), cached
 
     logger.info("Refreshing visit history: %s", reason)
+    tool_missing = False
     try:
-        visits = fetch_opsim(day_obs, tokenfile, site)
+        visits = fetch_opsim(day_obs, tokenfile, site, lsst_survey_sim=lsst_survey_sim)
+    except OpsimToolUnavailableError as exc:
+        # An environment problem, not a ConsDB problem; say so.
+        visits = None
+        tool_missing = True
+        fetch_error = str(exc)
+        logger.error("%s", exc)
     except Exception as exc:
         visits = None
         fetch_error = str(exc)
@@ -256,10 +329,18 @@ def ensure_opsim(
         logger.warning("Using a stale visit history: %s", cache.describe())
         return pd.read_parquet(cache_path), cache
 
+    # No cache to fall back on. Report the actual cause: blaming the token when
+    # the real problem is a missing package sends people down the wrong path.
+    if tool_missing:
+        raise OpsimToolUnavailableError(f"{fetch_error} No cache exists at {cache_path} either.")
+    if fetch_error:
+        raise RuntimeError(
+            f"Could not fetch the visit history from ConsDB ({fetch_error}) and no "
+            f"cache exists at {cache_path}. Check sim.opsim_tokenfile and "
+            "sim.opsim_site, and that ConsDB is reachable from here."
+        )
     raise RuntimeError(
-        "Could not fetch the visit history from ConsDB and no cache exists at "
-        f"{cache_path}. "
-        + (f"The fetch failed with: {fetch_error}. " if fetch_error else "ConsDB returned no visits. ")
-        + "Check sim.opsim_tokenfile and sim.opsim_site, or run "
-        "'chatterbox refresh-opsim' where ConsDB is reachable."
+        f"ConsDB returned no visits before day_obs {day_obs}, and no cache exists at "
+        f"{cache_path}. Check sim.opsim_site and that the day_obs is not earlier "
+        "than the start of the survey."
     )

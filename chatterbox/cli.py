@@ -196,6 +196,7 @@ def _cmd_refresh_opsim(args: argparse.Namespace, config: Config) -> int:
             site=cfg.opsim_site,
             max_age_hours=cfg.opsim_max_age_hours,
             force=args.force,
+            lsst_survey_sim=cfg.lsst_survey_sim,
         )
     except RuntimeError as exc:
         print(exc, file=sys.stderr)

@@ -118,8 +118,11 @@ with no published map are named explicitly rather than silently reading 0%.
 Point at a different directory with `--path`.
 
 `refresh-opsim` caches the visit history the simulation starts from, fetched
-from ConsDB with `lsst_survey_sim`'s own `fetch_previous_visits`. There is no
-opsim file to stage by hand: the cache refreshes when it is older than
+from ConsDB with `lsst_survey_sim`'s own `fetch_previous_visits`. That means
+`sim.lsst_survey_sim` must point at a checkout (or the package must be
+installed) even when you are only refreshing the cache and not simulating.
+
+There is no opsim file to stage by hand: the cache refreshes when it is older than
 `sim.opsim_max_age_hours` (24 h by default), or when it predates the night being
 simulated — so a ToO arriving on a night cron has not covered refreshes it
 itself before simulating. If ConsDB is unreachable and a cache exists, the
@@ -203,7 +206,7 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 .venv/bin/python -m pytest
 ```
 
-235 tests, no network access required. Notable checks:
+243 tests, no network access required. Notable checks:
 
 - The dark-hours map is validated against `astropy`'s full `AltAz` transform —
   an independent code path from the fast approximation used in production —

@@ -8,7 +8,13 @@ from .coverage import (
     coverage_curve,
     too_visits,
 )
-from .opsim import OpsimCache, default_day_obs, ensure_opsim, fetch_opsim
+from .opsim import (
+    OpsimCache,
+    OpsimToolUnavailableError,
+    default_day_obs,
+    ensure_opsim,
+    fetch_opsim,
+)
 from .runner import SimJob, SimResult, launch_simulation, load_sim_result
 
 __all__ = [
@@ -19,6 +25,7 @@ __all__ = [
     "band_coverage_by_epoch",
     "coverage_curve",
     "OpsimCache",
+    "OpsimToolUnavailableError",
     "ensure_opsim",
     "fetch_opsim",
     "default_day_obs",
