@@ -6,7 +6,9 @@ scheduler plans against.
 """
 
 import logging
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -145,7 +147,18 @@ def night_events(
     from rubin_scheduler.utils import Site
 
     site = Site("LSST")
-    almanac = Almanac()
+    try:
+        almanac = Almanac()
+    except (FileNotFoundError, OSError) as exc:
+        # rubin_scheduler resolves its data through RUBIN_SIM_DATA_DIR and
+        # falls back to $HOME/rubin_sim_data without complaint, so the useful
+        # thing to report is which directory it actually looked in.
+        data_dir = os.environ.get("RUBIN_SIM_DATA_DIR") or f"{Path.home() / 'rubin_sim_data'} (default)"
+        raise RuntimeError(
+            f"Could not load the almanac from {data_dir}: {exc}. "
+            "Set sim.rubin_sim_data to a rubin_sim_data tree containing "
+            "site_models, or run 'scheduler_download_data --dirs site_models'."
+        ) from exc
 
     if day_obs is not None:
         info = almanac.get_sunset_info(evening_date=day_obs, longitude=site.longitude_rad)
@@ -155,9 +168,8 @@ def night_events(
         info = almanac.get_sunset_info(mjd=float(when.mjd), longitude=site.longitude_rad)
 
         # get_sunset_info returns the night containing or preceding the time,
-        # so
-        # a daytime trigger lands on a night that has already finished. Advance
-        # in half-day steps until the night still has observable time left.
+        # so a daytime trigger lands on a night that has already finished.
+        # Advance in half-day steps until the night has observable time left.
         # Stepping rather than computing an offset avoids depending on exactly
         # where the almanac places its night boundary.
         if prefer_next_night and float(when.mjd) > float(info["sun_n12_rising"]):

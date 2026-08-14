@@ -22,7 +22,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .config import Config, load_config
+from .config import Config, apply_environment, load_config
 
 __all__ = ["main", "build_parser"]
 
@@ -278,6 +278,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"Could not load configuration: {exc}", file=sys.stderr)
         return 2
+
+    # Must happen before any subcommand imports or calls rubin_scheduler.
+    apply_environment(config)
 
     handlers = {
         "serve": _cmd_serve,

@@ -84,6 +84,127 @@ def test_empty_token_is_treated_as_absent(monkeypatch):
     assert config.slack_token is None
 
 
+# ------------------------------------------------------- RUBIN_SIM_DATA_DIR
+
+
+@pytest.fixture(autouse=True)
+def _reset_data_dir_memo():
+    """Clear the once-per-path diagnostic memo between tests."""
+    import chatterbox.config as config_mod
+
+    config_mod._validated_data_dir = None
+    yield
+    config_mod._validated_data_dir = None
+
+
+def test_apply_environment_exports_the_configured_data_dir(tmp_path, monkeypatch):
+    """rubin_scheduler silently falls back to $HOME/rubin_sim_data otherwise.
+
+    That fallback is what made a configured sim.rubin_sim_data look ignored on
+    the alert path, which runs in-process rather than in the sim subprocess.
+    """
+    from chatterbox.config import apply_environment
+
+    tree = tmp_path / "rubin_sim_data"
+    (tree / "site_models").mkdir(parents=True)
+    monkeypatch.delenv("RUBIN_SIM_DATA_DIR", raising=False)
+
+    config = Config()
+    config.sim.rubin_sim_data = str(tree)
+    apply_environment(config)
+
+    import os
+
+    assert os.environ["RUBIN_SIM_DATA_DIR"] == str(tree)
+
+
+def test_apply_environment_expands_user(tmp_path, monkeypatch):
+    from chatterbox.config import apply_environment
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "data" / "site_models").mkdir(parents=True)
+    monkeypatch.delenv("RUBIN_SIM_DATA_DIR", raising=False)
+
+    config = Config()
+    config.sim.rubin_sim_data = "~/data"
+    apply_environment(config)
+
+    import os
+
+    assert os.environ["RUBIN_SIM_DATA_DIR"] == str(tmp_path / "data")
+
+
+def test_config_wins_over_an_inherited_env_var(tmp_path, monkeypatch, caplog):
+    """A stale shell variable must not quietly override the config file."""
+    from chatterbox.config import apply_environment
+
+    tree = tmp_path / "configured"
+    (tree / "site_models").mkdir(parents=True)
+    monkeypatch.setenv("RUBIN_SIM_DATA_DIR", "/somewhere/stale")
+
+    config = Config()
+    config.sim.rubin_sim_data = str(tree)
+    with caplog.at_level("INFO"):
+        apply_environment(config)
+
+    import os
+
+    assert os.environ["RUBIN_SIM_DATA_DIR"] == str(tree)
+    assert "Overriding inherited" in caplog.text
+
+
+def test_empty_setting_leaves_the_environment_alone(monkeypatch):
+    from chatterbox.config import apply_environment
+
+    monkeypatch.setenv("RUBIN_SIM_DATA_DIR", "/inherited")
+    config = Config()
+    config.sim.rubin_sim_data = ""
+    apply_environment(config)
+
+    import os
+
+    assert os.environ["RUBIN_SIM_DATA_DIR"] == "/inherited"
+
+
+def test_missing_tree_is_reported_up_front(tmp_path, monkeypatch, caplog):
+    """Better to say so at startup than several seconds into an alert."""
+    from chatterbox.config import apply_environment
+
+    monkeypatch.delenv("RUBIN_SIM_DATA_DIR", raising=False)
+    config = Config()
+    config.sim.rubin_sim_data = str(tmp_path / "absent")
+    with caplog.at_level("ERROR"):
+        apply_environment(config)
+    assert "does not exist" in caplog.text
+    assert "scheduler_download_data" in caplog.text
+
+
+def test_missing_site_models_is_reported(tmp_path, monkeypatch, caplog):
+    from chatterbox.config import apply_environment
+
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    monkeypatch.delenv("RUBIN_SIM_DATA_DIR", raising=False)
+    config = Config()
+    config.sim.rubin_sim_data = str(tree)
+    with caplog.at_level("ERROR"):
+        apply_environment(config)
+    assert "site_models" in caplog.text
+
+
+def test_diagnostics_are_not_repeated_per_call(tmp_path, monkeypatch, caplog):
+    """apply_environment runs per alert; a bad path must not spam the log."""
+    from chatterbox.config import apply_environment
+
+    monkeypatch.delenv("RUBIN_SIM_DATA_DIR", raising=False)
+    config = Config()
+    config.sim.rubin_sim_data = str(tmp_path / "absent")
+    with caplog.at_level("ERROR"):
+        apply_environment(config)
+        apply_environment(config)
+    assert caplog.text.count("does not exist") == 1
+
+
 def test_work_path_creates_parents(tmp_path):
     config = Config()
     config.paths.work_dir = str(tmp_path / "work")

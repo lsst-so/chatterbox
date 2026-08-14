@@ -30,6 +30,7 @@ __all__ = [
     "PathsConfig",
     "LinksConfig",
     "load_config",
+    "apply_environment",
     "DEFAULT_CONFIG_PATHS",
 ]
 
@@ -39,6 +40,10 @@ DEFAULT_CONFIG_PATHS = (
     Path("config.yaml"),
     Path("~/.config/chatterbox/config.yaml").expanduser(),
 )
+
+#: Last data directory `apply_environment` diagnosed, so a bad path is reported
+#: once rather than on every alert.
+_validated_data_dir: Path | None = None
 
 
 @dataclass
@@ -287,3 +292,70 @@ def load_config(path: str | Path | None = None) -> Config:
         raise FileNotFoundError(f"Config file not found: {path}")
     logger.info("No config file found; using defaults")
     return Config()
+
+
+def apply_environment(config: Config) -> None:
+    """Export the environment variables the Rubin libraries read.
+
+    ``rubin_scheduler`` finds its data through ``RUBIN_SIM_DATA_DIR`` and
+    silently falls back to ``$HOME/rubin_sim_data`` when it is unset, so
+    ``sim.rubin_sim_data`` has to reach the process actually doing the work.
+    The simulation subprocess gets it through its own environment; the alert
+    path -- which needs the almanac for sunset, moonrise and the dark-hours map
+    -- runs in *this* process, so it has to be set here.
+
+    Call this once after loading the configuration and before anything imports
+    or calls into ``rubin_scheduler``. ``get_data_dir()`` reads the variable on
+    every call, so setting it at runtime is enough.
+
+    Parameters
+    ----------
+    config : `Config`
+        Loaded configuration.
+
+    Notes
+    -----
+    The configured value wins over an inherited ``RUBIN_SIM_DATA_DIR``: the
+    config file is the more deliberate statement of intent here, and a stale
+    shell variable quietly overriding it is exactly the confusion this
+    function exists to prevent. The override is logged when it happens.
+    """
+    configured = (config.sim.rubin_sim_data or "").strip()
+    if not configured:
+        return
+
+    resolved = Path(configured).expanduser()
+    inherited = os.environ.get("RUBIN_SIM_DATA_DIR")
+    if inherited and Path(inherited).expanduser() != resolved:
+        logger.info(
+            "Overriding inherited RUBIN_SIM_DATA_DIR=%s with sim.rubin_sim_data=%s",
+            inherited,
+            resolved,
+        )
+    os.environ["RUBIN_SIM_DATA_DIR"] = str(resolved)
+
+    # Called from both the CLI and process_trigger, so only diagnose a given
+    # path once; repeating the same error per alert is just noise.
+    global _validated_data_dir
+    if _validated_data_dir == resolved:
+        return
+    _validated_data_dir = resolved
+
+    # Fail loudly here rather than several seconds into an alert, and name the
+    # subdirectory the almanac actually needs.
+    if not resolved.is_dir():
+        logger.error(
+            "sim.rubin_sim_data=%s does not exist; the almanac and dark-hours map "
+            "will fail. Point it at a rubin_sim_data tree, or run "
+            "'scheduler_download_data' to create one.",
+            resolved,
+        )
+    elif not (resolved / "site_models").is_dir():
+        logger.error(
+            "sim.rubin_sim_data=%s has no 'site_models' subdirectory, which is "
+            "where the almanac reads sunsets.npz from. Run "
+            "'scheduler_download_data --dirs site_models'.",
+            resolved,
+        )
+    else:
+        logger.debug("RUBIN_SIM_DATA_DIR=%s", resolved)

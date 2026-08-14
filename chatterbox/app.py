@@ -28,7 +28,7 @@ from .alerts import get_alert_class
 from .astro.almanac import NightEvents, night_events
 from .astro.darkhours import DarkHoursMap, dark_hours_map
 from .astro.templates import TemplateCoverage, load_template_maps
-from .config import Config
+from .config import Config, apply_environment
 from .ingest.decode import decode_record
 from .ingest.enrich_gracedb import enrich_gravitational_wave
 from .models import Trigger
@@ -136,6 +136,9 @@ def process_trigger(
     """
     started = time.monotonic()
     warnings: list[str] = []
+
+    # Idempotent; the CLI already did this, but a library caller may not have.
+    apply_environment(config)
 
     trigger = decode_record(record)
     alert_class = get_alert_class(trigger.alert_type)
