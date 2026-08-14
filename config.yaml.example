@@ -10,12 +10,12 @@ slack:
   # rather than an incoming webhook, because webhooks cannot upload the plots.
   # Scopes needed: chat:write, files:write.
   bot_token_env: SLACK_BOT_TOKEN
-  channel: "#too-alerts"
+  channel: "#rso-too-monitor-dev"
   # Where alerts flagged is_test go. Leave empty to send them to `channel`,
   # where they are still visibly marked as tests.
-  test_channel: "#too-alerts-test"
-  username: chatterbox
-  icon_emoji: ":satellite:"
+  test_channel: "#rso-too-monitor-dev"
+  username: Chatterbox
+  icon_emoji: ":boom:"
   # Slack IDs to @-mention on non-test alerts, e.g. ["!subteam^S01ABCDEF"].
   mention: []
 
@@ -31,21 +31,21 @@ ingest:
   kafka_group_id: chatterbox
 
   watch_dir: ~/.chatterbox/incoming
-  poll_interval_s: 2.0
+  poll_interval_s: 1.0
   # Process alerts flagged is_test. Set false to drop them entirely.
   allow_tests: true
 
 dark_hours:
   # Resolution of the accessible-dark-hours map. 64 takes about 0.3 s; 128
   # takes about 1.5 s.
-  nside: 64
+  nside: 128
   step_minutes: 5.0
   # Airmass < 2 corresponds to altitude > 30 degrees.
   airmass_limit: 2.0
   # Must be -12 or -18: the almanac provides those two crossings.
   sun_alt_limit_deg: -12.0
   # Set > 0 to also exclude pixels within this many degrees of the Moon.
-  moon_avoidance_deg: 0.0
+  moon_avoidance_deg: 30.0
 
 templates:
   # Template coverage is produced upstream by the incremental templates tooling,
@@ -75,11 +75,11 @@ sim:
   # An interpreter with rubin_scheduler and lsst_survey_sim importable. The
   # simulation runs as a subprocess, so this need not be the bot's own
   # interpreter.
-  python: ~/mamba/envs/scheduler_dev_env/bin/python
-  lsst_survey_sim: ~/Desktop/Repos/lsst_survey_sim
-  ts_config_scheduler: ~/Desktop/Repos/ts_config_scheduler
+  python: /sdf/group/rubin/sw/conda/bin/python 
+  lsst_survey_sim: ~/Rubin-Observatory/lsst_survey_sim
+  ts_config_scheduler: ~/Rubin-Observatory/ts_config_scheduler
   # Must be the tree containing sim_baseline.
-  rubin_sim_data: ~/RubinUtils/rubin_sim_data
+  rubin_sim_data: /sdf/group/rubin/shared/rubin_sim_data/ 
   # Pre-fetched visit history; see rubin_nights/scripts/make_opsim.py.
   opsim_h5: ~/Desktop/Repos/lsst_survey_sim/notebooks2/opsim.h5
   # 0 uses the per-alert-class default (GW 20, BBH 50, neutrino 30, SNe/SSO 5).
