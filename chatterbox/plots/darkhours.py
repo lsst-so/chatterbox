@@ -7,6 +7,7 @@ import healpy as hp
 import numpy as np
 
 from ..astro.darkhours import DarkHoursMap
+from ..deps import require
 from ..models import Localization
 from .style import PROJECTION, add_galactic_plane, localization_levels, mark_coord, use_headless_backend
 
@@ -46,7 +47,9 @@ def plot_dark_hours(
         The file written.
     """
     use_headless_backend()
-    import ligo.skymap.plot  # noqa: F401  (registers the projections)
+    # Registers the 'astro ... mollweide' projections. require() names the
+    # interpreter, since a wrong-environment install is the usual cause.
+    require("ligo.skymap.plot")
     from matplotlib import pyplot as plt
 
     events = dark_hours.events

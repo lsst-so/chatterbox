@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from ..astro.templates import TemplateCoverage
+from ..deps import require
 from ..models import Localization
 from .style import (
     BAND_COLORS,
@@ -58,7 +59,9 @@ def plot_template_coverage(
         The file written, or None when there was nothing to draw.
     """
     use_headless_backend()
-    import ligo.skymap.plot  # noqa: F401  (registers the projections)
+    # Registers the 'astro ... mollweide' projections. require() names the
+    # interpreter, since a wrong-environment install is the usual cause.
+    require("ligo.skymap.plot")
     from matplotlib import pyplot as plt
 
     out_path = Path(out_path)

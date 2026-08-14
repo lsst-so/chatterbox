@@ -57,7 +57,9 @@ def is_superevent_id(source: str) -> bool:
 
 def _client(config: EnrichConfig):
     """Construct an unauthenticated GraceDB client for public data."""
-    from ligo.gracedb.rest import GraceDb
+    from ..deps import require
+
+    GraceDb = require("ligo.gracedb.rest").GraceDb
 
     # Public superevents need no credentials; asking for them would fail on a
     # host with no certificate. fail_if_noauth=False keeps it anonymous.

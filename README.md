@@ -135,6 +135,13 @@ loop, and it renders both plots and prints the message as text:
 python -m chatterbox.cli replay tests/data/gw_case_b.json --dry-run --no-sim
 ```
 
+Check the environment — which capabilities work, which are degraded, and the
+exact command to fix each one. Worth running first on any new host:
+
+```bash
+python -m chatterbox.cli doctor
+```
+
 Confirm Slack credentials and channel access:
 
 ```bash
@@ -206,7 +213,7 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 .venv/bin/python -m pytest
 ```
 
-250 tests, no network access required. Notable checks:
+271 tests, no network access required. Notable checks:
 
 - The dark-hours map is validated against `astropy`'s full `AltAz` transform —
   an independent code path from the fast approximation used in production —

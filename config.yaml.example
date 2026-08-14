@@ -72,9 +72,10 @@ enrich:
 
 sim:
   enabled: true
-  # An interpreter with rubin_scheduler and lsst_survey_sim importable. The
-  # simulation runs as a subprocess, so this need not be the bot's own
-  # interpreter.
+  # Interpreter for the simulation subprocess; it needs healpy,
+  # rubin_scheduler and lsst_survey_sim. Leave empty to use the interpreter
+  # running chatterbox, which is usually what you want. `chatterbox doctor`
+  # checks whether whatever you set here can actually import them.
   python: /sdf/group/rubin/sw/conda/bin/python 
   # Checkout of lsst_survey_sim. It is added to sys.path, so this works whether
   # the package is pip-installed or used from a clone. `refresh-opsim` needs it

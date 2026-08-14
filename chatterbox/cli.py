@@ -15,6 +15,8 @@ Subcommands
     Run the scheduler simulation for a record synchronously and print coverage.
 ``test-post``
     Send a short message to confirm Slack credentials and channel access.
+``doctor``
+    Report which capabilities are available and how to fix the missing ones.
 """
 
 import argparse
@@ -88,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sim.add_argument("--nights", type=int, help="Override the per-class night count")
 
     sub.add_parser("test-post", help="Post a test message to confirm Slack access")
+    sub.add_parser("doctor", help="Report what works, what does not, and how to fix it")
 
     return parser
 
@@ -206,6 +209,14 @@ def _cmd_refresh_opsim(args: argparse.Namespace, config: Config) -> int:
     return 1 if cache.stale_reason else 0
 
 
+def _cmd_doctor(args: argparse.Namespace, config: Config) -> int:
+    from .doctor import diagnose, format_report
+
+    checks = diagnose(config)
+    print(format_report(checks))
+    return 1 if any(not c.ok and c.fatal for c in checks) else 0
+
+
 def _cmd_simulate(args: argparse.Namespace, config: Config) -> int:
     from .ingest.decode import load_record_file
     from .ingest.enrich_gracedb import enrich_gravitational_wave
@@ -289,6 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         "refresh-opsim": _cmd_refresh_opsim,
         "simulate": _cmd_simulate,
         "test-post": _cmd_test_post,
+        "doctor": _cmd_doctor,
     }
     return handlers[args.command](args, config)
 

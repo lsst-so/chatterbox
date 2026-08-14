@@ -152,8 +152,12 @@ class SimConfig:
     """Scheduler simulation launched as a background job."""
 
     enabled: bool = True
-    #: Interpreter with rubin_scheduler + lsst_survey_sim available.
-    python: str = "~/mamba/envs/scheduler_dev_env/bin/python"
+    #: Interpreter that runs the simulation subprocess. It needs healpy,
+    #: rubin_scheduler and lsst_survey_sim. Empty means "the interpreter
+    #: running chatterbox", which is usually right: if the bot can compute the
+    #: almanac it can generally run the simulation too. Point this elsewhere
+    #: only when the simulation genuinely needs a different environment.
+    python: str = ""
     lsst_survey_sim: str = "~/Desktop/Repos/lsst_survey_sim"
     ts_config_scheduler: str = "~/Desktop/Repos/ts_config_scheduler"
     #: Must be the tree containing ``sim_baseline``.

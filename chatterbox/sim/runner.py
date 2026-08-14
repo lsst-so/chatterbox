@@ -33,9 +33,70 @@ from ..alerts import sim_nights_for
 from ..config import Config
 from ..models import Trigger
 
-__all__ = ["SimJob", "SimResult", "launch_simulation", "load_sim_result", "write_job_spec"]
+__all__ = [
+    "SimJob",
+    "SimResult",
+    "launch_simulation",
+    "load_sim_result",
+    "write_job_spec",
+    "resolve_sim_python",
+    "check_sim_python",
+]
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_sim_python(configured: str) -> Path:
+    """Interpreter to run the simulation subprocess with.
+
+    An empty ``sim.python`` means "the one running chatterbox", which is the
+    right default: an environment able to compute the almanac can usually run
+    the simulation too, and it removes a setting that is easy to point at the
+    wrong conda base.
+
+    Parameters
+    ----------
+    configured : `str`
+        The ``sim.python`` setting.
+
+    Returns
+    -------
+    python : `pathlib.Path`
+    """
+    configured = (configured or "").strip()
+    if not configured:
+        return Path(sys.executable)
+    return Path(configured).expanduser()
+
+
+def check_sim_python(python: Path) -> tuple[bool, str]:
+    """Can this interpreter import what the simulation driver needs?
+
+    Parameters
+    ----------
+    python : `pathlib.Path`
+        Interpreter to probe.
+
+    Returns
+    -------
+    ok : `bool`
+        True when the driver's imports would succeed.
+    detail : `str`
+        Empty when ok, otherwise what is wrong.
+    """
+    from ..doctor import DRIVER_REQUIREMENTS, _probe_interpreter
+
+    # Skip the subprocess when it is this very interpreter: we already know.
+    if python.resolve() == Path(sys.executable).resolve():
+        missing = []
+        for module in DRIVER_REQUIREMENTS:
+            try:
+                __import__(module)
+            except Exception as exc:
+                missing.append(f"{module} ({type(exc).__name__})")
+        return (not missing), ("cannot import " + ", ".join(missing) if missing else "")
+
+    return _probe_interpreter(python, DRIVER_REQUIREMENTS)
 
 
 @dataclass
@@ -197,13 +258,9 @@ def launch_simulation(
     job_dir = Path(config.paths.work_dir).expanduser() / "sim" / f"{trigger.source}_{stamp}"
     write_job_spec(trigger, config, job_dir, nights)
 
-    python = str(Path(config.sim.python).expanduser())
-    if not Path(python).is_file():
-        logger.error(
-            "Configured sim interpreter %s does not exist; set sim.python to an "
-            "interpreter with rubin_scheduler and lsst_survey_sim installed",
-            python,
-        )
+    def give_up(message: str) -> SimJob:
+        """Record a launch failure as a result, not a buried traceback."""
+        logger.error("%s", message)
         (job_dir / "result.json").write_text(
             json.dumps(
                 {
@@ -211,11 +268,31 @@ def launch_simulation(
                     "source": trigger.source,
                     "alert_type": trigger.alert_type,
                     "nights": nights,
-                    "error": f"sim interpreter not found: {python}",
+                    "error": message,
                 }
             )
         )
         return SimJob(job_dir=job_dir, source=trigger.source, alert_type=trigger.alert_type, nights=nights)
+
+    python = resolve_sim_python(config.sim.python)
+    if not python.is_file():
+        return give_up(
+            f"sim interpreter not found: {python}. Set sim.python to an interpreter "
+            "with healpy, rubin_scheduler and lsst_survey_sim, or leave it empty to "
+            f"use the one running chatterbox ({sys.executable}). "
+            "Run 'chatterbox doctor' to check."
+        )
+
+    # Probe before launching. Otherwise a wrong interpreter surfaces as a
+    # traceback inside sim.log, which nobody sees until they go looking.
+    ok, detail = check_sim_python(python)
+    if not ok:
+        return give_up(
+            f"sim interpreter {python} cannot run the simulation: {detail}. "
+            "Set sim.python to an interpreter that has these, or leave it empty to "
+            f"use the one running chatterbox ({sys.executable}). "
+            "Run 'chatterbox doctor' to check."
+        )
 
     env = dict(os.environ)
     env["RUBIN_SIM_DATA_DIR"] = str(Path(config.sim.rubin_sim_data).expanduser())
