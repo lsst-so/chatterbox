@@ -7,7 +7,9 @@ Two stages, so a low-latency post and a full-length simulation can coexist:
    is posted immediately. GraceDB enrichment runs concurrently with the almanac
    and dark-hours work so it does not simply add to the critical path.
 2. The scheduler simulation runs as a background process and its per-band
-   coverage is posted as a threaded reply when it finishes.
+   coverage is posted as a threaded reply when it finishes. The per-night visit
+   figures from the same run go out as a message of their own, since a long run
+   attaches many of them.
 
 Failures are contained per stage. If a plot cannot be rendered, the text still
 goes out; if enrichment fails, the post says the figures are area-based; if the
@@ -34,7 +36,7 @@ from .ingest.enrich_gracedb import enrich_gravitational_wave
 from .models import Trigger
 from .plots.darkhours import plot_dark_hours, region_hours_summary
 from .plots.templates import plot_template_coverage
-from .sim.runner import launch_simulation, load_sim_result
+from .sim.runner import SimResult, launch_simulation, load_sim_result
 from .slackbot.blocks import (
     build_nightly_visits_blocks,
     build_sim_reply_blocks,
@@ -43,7 +45,7 @@ from .slackbot.blocks import (
 )
 from .slackbot.client import PostedMessage, SlackPoster
 
-__all__ = ["TriggerReport", "process_trigger", "run_service"]
+__all__ = ["TriggerReport", "process_trigger", "post_sim_results", "run_service"]
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +246,77 @@ def process_trigger(
     return report
 
 
+def post_sim_results(
+    result: SimResult,
+    config: Config,
+    poster: SlackPoster,
+    parent: PostedMessage | None = None,
+    is_test: bool = False,
+) -> list[PostedMessage]:
+    """Post a finished simulation: coverage first, then the nightly figures.
+
+    Two separate messages, because they are read at different times and one
+    would drown the other: a 20-night run attaches many figures.
+
+    Parameters
+    ----------
+    result : `SimResult`
+        Completed simulation.
+    config : `Config`
+        Configuration.
+    poster : `SlackPoster`
+        Delivery mechanism. An offline or dry-run poster writes both payloads
+        to disk instead, which is how a run is previewed.
+    parent : `PostedMessage`, optional
+        The alert's own message, to thread the coverage onto. Without one -- a
+        dry run, a `simulate` invocation, or a stage-1 post that failed -- the
+        coverage is posted standalone rather than dropped.
+    is_test : `bool`
+        Route to the test channel when one is configured.
+
+    Returns
+    -------
+    posted : `list` [`PostedMessage`]
+        What actually went out, for reporting. Empty when both posts failed.
+    """
+    sent: list[PostedMessage] = []
+
+    blocks = build_sim_reply_blocks(result, config)
+    files = [result.curve_plot] if result.curve_plot else None
+    summary = f"Simulation for {result.source}: " + (
+        ", ".join(f"{b} {100 * v:.0f}%" for b, v in result.coverage.items() if v > 0)
+        or (result.error or "no coverage")
+    )
+    try:
+        if parent is not None:
+            posted = poster.reply(parent, blocks, summary, files=files, label=f"{result.source}_sim")
+        else:
+            posted = poster.post(blocks, summary, is_test=is_test, files=files, label=f"{result.source}_sim")
+        if posted is not None:
+            sent.append(posted)
+    except Exception as exc:
+        logger.error("Could not post the simulation coverage: %s", exc)
+
+    # Its own message, and caught separately: losing the coverage text must not
+    # also lose the figures.
+    if result.nightly_plots:
+        try:
+            sent.append(
+                poster.post(
+                    build_nightly_visits_blocks(result, config),
+                    f"Simulated nightly coverage of {result.source}: "
+                    f"{len(result.nightly_plots)} night(s), run in {result.job_dir}",
+                    is_test=is_test,
+                    files=result.nightly_plots,
+                    label=f"{result.source}_nightly",
+                )
+            )
+        except Exception as exc:
+            logger.error("Could not post the nightly coverage plots: %s", exc)
+
+    return sent
+
+
 def _start_simulation(
     trigger: Trigger,
     config: Config,
@@ -267,34 +340,18 @@ def _start_simulation(
             )
             return
         logger.info("Simulation for %s finished with status %s", trigger.source, result.status)
-        if poster is None or report.posted is None:
+        if poster is None:
             return
-        blocks = build_sim_reply_blocks(result, config)
-        files = [result.curve_plot] if result.curve_plot else None
-        summary = f"Simulation for {result.source}: " + (
-            ", ".join(f"{b} {100 * v:.0f}%" for b, v in result.coverage.items() if v > 0)
-            or (result.error or "no coverage")
+        # `report.posted` is None in a dry run, and when stage 1 could not be
+        # posted. Neither is a reason to throw the simulation away, so the
+        # results still go out -- standalone rather than threaded.
+        post_sim_results(
+            result,
+            config,
+            poster,
+            parent=report.posted,
+            is_test=trigger.is_test,
         )
-        try:
-            poster.reply(report.posted, blocks, summary, files=files, label=f"{result.source}_sim")
-        except Exception as exc:
-            logger.error("Could not post the simulation reply: %s", exc)
-
-        # The per-night figures start a thread of their own: there can be many,
-        # and they would swamp the alert's thread.
-        if result.nightly_plots:
-            try:
-                nightly_blocks = build_nightly_visits_blocks(result, config)
-                poster.post(
-                    nightly_blocks,
-                    f"Simulated nightly coverage of {result.source}: "
-                    f"{len(result.nightly_plots)} night(s), run in {result.job_dir}",
-                    is_test=trigger.is_test,
-                    files=result.nightly_plots,
-                    label=f"{result.source}_nightly",
-                )
-            except Exception as exc:
-                logger.error("Could not post the nightly coverage plots: %s", exc)
 
     if sim_wait:
         finish()

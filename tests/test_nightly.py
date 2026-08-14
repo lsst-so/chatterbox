@@ -13,7 +13,7 @@ from chatterbox.plots.style import localization_extent, localization_levels, sky
 from chatterbox.sim.coverage import nightly_visit_maps, visits_overlapping
 from chatterbox.sim.runner import SimResult
 from chatterbox.slackbot.blocks import build_nightly_visits_blocks
-from chatterbox.slackbot.client import render_blocks_as_text
+from chatterbox.slackbot.client import PostedMessage, render_blocks_as_text
 
 NSIDE = 128
 
@@ -390,3 +390,142 @@ def test_nightly_plots_start_their_own_thread(config, tmp_path):
     # A top-level post carries no thread_ts; its files ride in its own thread.
     assert "thread_ts" not in payload
     assert len(payload["files"]) == 2
+
+
+class RecordingPoster:
+    """A poster that records calls instead of reaching Slack."""
+
+    def __init__(self):
+        self.posts = []
+        self.replies = []
+        self.offline = False
+        self.output_dir = "/dev/null"
+
+    def post(self, blocks, text, is_test=False, files=None, label="post"):
+        from chatterbox.slackbot.client import PostedMessage
+
+        self.posts.append({"blocks": blocks, "text": text, "files": files, "label": label})
+        return PostedMessage(channel="#too", ts=f"{len(self.posts)}.0")
+
+    def reply(self, parent, blocks, text, files=None, label="reply"):
+        from chatterbox.slackbot.client import PostedMessage
+
+        self.replies.append({"parent": parent, "text": text, "files": files, "label": label})
+        return PostedMessage(channel=parent.channel, ts="9.9")
+
+
+def test_post_sim_results_posts_the_figures(config):
+    """The figures must actually be handed to the poster, with the message."""
+    from chatterbox.app import post_sim_results
+
+    poster = RecordingPoster()
+    result = sim_result()
+    parent = PostedMessage(channel="#too", ts="1.0")
+    sent = post_sim_results(result, config, poster, parent=parent)
+
+    assert len(poster.replies) == 1, "coverage belongs in the alert's thread"
+    assert len(poster.posts) == 1, "the figures belong in a message of their own"
+    assert poster.posts[0]["files"] == result.nightly_plots
+    assert poster.posts[0]["label"] == "S251112cm_nightly"
+    assert len(sent) == 2
+
+
+def test_figures_are_posted_without_a_parent_message(config):
+    """Regression: the figures were gated on stage 1 having posted.
+
+    They are a top-level message, so they need no parent -- but the old code
+    returned early when there was none, which meant a dry run, or a stage-1
+    post that failed, silently produced PNGs and no Slack message at all.
+    """
+    from chatterbox.app import post_sim_results
+
+    poster = RecordingPoster()
+    sent = post_sim_results(sim_result(), config, poster, parent=None)
+
+    assert not poster.replies
+    labels = [p["label"] for p in poster.posts]
+    assert labels == ["S251112cm_sim", "S251112cm_nightly"]
+    assert len(sent) == 2
+
+
+def test_a_failed_coverage_post_still_posts_the_figures(config):
+    """Losing the text must not also lose the figures."""
+    from chatterbox.app import post_sim_results
+
+    poster = RecordingPoster()
+    original = poster.post
+
+    def fail_first(blocks, text, is_test=False, files=None, label="post"):
+        if label.endswith("_sim"):
+            raise RuntimeError("Slack said no")
+        return original(blocks, text, is_test=is_test, files=files, label=label)
+
+    poster.post = fail_first
+    sent = post_sim_results(sim_result(), config, poster, parent=None)
+
+    assert [p["label"] for p in poster.posts] == ["S251112cm_nightly"]
+    assert len(sent) == 1
+
+
+def test_dry_run_writes_both_payloads(config, tmp_path):
+    """How a real run is previewed before it goes to a channel."""
+    from chatterbox.app import post_sim_results
+    from chatterbox.slackbot.client import SlackPoster
+
+    plots = []
+    for name in ("n1.png", "n2.png"):
+        path = tmp_path / name
+        path.write_bytes(b"x")
+        plots.append(str(path))
+
+    poster = SlackPoster(config, dry_run=True, output_dir=tmp_path)
+    post_sim_results(sim_result(nightly_plots=plots), config, poster)
+
+    assert (tmp_path / "S251112cm_sim.json").is_file()
+    nightly = json.loads((tmp_path / "S251112cm_nightly.json").read_text())
+    assert nightly["files"] == plots
+
+
+def test_the_service_delivers_the_figures_when_stage_one_did_not_post(config, monkeypatch, tmp_path):
+    """The same regression, at the site that had it: the service's own path."""
+    from types import SimpleNamespace
+
+    from chatterbox import app
+
+    job = SimpleNamespace(job_dir=tmp_path, wait=lambda timeout=None: 0, tail_log=lambda lines=20: "")
+    monkeypatch.setattr(app, "launch_simulation", lambda trigger, cfg: job)
+    monkeypatch.setattr(app, "load_sim_result", lambda job_dir: sim_result())
+
+    poster = RecordingPoster()
+    trigger = SimpleNamespace(source="S251112cm", is_test=False)
+    report = SimpleNamespace(posted=None)
+    app._start_simulation(trigger, config, poster, report, sim_wait=True)
+
+    assert [p["label"] for p in poster.posts] == ["S251112cm_sim", "S251112cm_nightly"]
+
+
+def test_test_alerts_route_both_messages(config):
+    """An is_test simulation must not land in the operational channel."""
+    from chatterbox.app import post_sim_results
+    from chatterbox.slackbot.client import SlackPoster
+
+    config.slack.channel = "#too"
+    config.slack.test_channel = "#too-test"
+    poster = SlackPoster(config, dry_run=True)
+    assert poster.channel_for(is_test=True) == "#too-test"
+
+    recorder = RecordingPoster()
+    post_sim_results(sim_result(), config, recorder, is_test=True)
+    assert all(p["blocks"] for p in recorder.posts)
+    # The routing itself lives in the poster; what matters here is that the
+    # flag reaches it for both messages.
+    calls = []
+    original = recorder.post
+
+    def capture(blocks, text, is_test=False, files=None, label="post"):
+        calls.append(is_test)
+        return original(blocks, text, is_test=is_test, files=files, label=label)
+
+    recorder.post = capture
+    post_sim_results(sim_result(), config, recorder, is_test=True)
+    assert calls == [True, True]

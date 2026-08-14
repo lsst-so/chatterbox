@@ -175,6 +175,17 @@ The job directory it prints holds everything the simulation produced: the opsim
 database of visits, the cumulative-coverage plot, and the per-night visit-count
 figures, so the sim can be inspected without going through Slack.
 
+`simulate` posts nothing by default, since it is an inspection command. Add
+`--post` to send the coverage and the per-night figures to the channel — the
+same two messages the service posts, minus the alert thread to hang the coverage
+under, so it goes out standalone. `--dry-run` renders both payloads under
+`<work_dir>/posts` instead, which is how to read a real run's messages before
+letting them reach anyone:
+
+```bash
+python -m chatterbox.cli simulate tests/data/gw_case_b.json --nights 3 --post
+```
+
 ## The one thing to understand: area vs probability
 
 The producer's output record carries exactly nine fields. It computes FAR,
@@ -230,7 +241,7 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 .venv/bin/python -m pytest
 ```
 
-313 tests, no network access required. Notable checks:
+319 tests, no network access required. Notable checks:
 
 - The dark-hours map is validated against `astropy`'s full `AltAz` transform —
   an independent code path from the fast approximation used in production —
@@ -245,6 +256,9 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
   pixel: a real BAYESTAR map has faint tails almost everywhere, and selecting
   on those would both match visits far outside the contour and make the
   overlap test crawl over the whole sky.
+- The simulation's figures reach Slack even when the alert has no message to
+  thread onto, and a failed coverage post does not take them down with it —
+  both were ways for a run to produce PNGs and post nothing.
 
 ## Known limitations
 

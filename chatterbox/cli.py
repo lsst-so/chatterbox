@@ -13,6 +13,7 @@ Subcommands
     Refresh the cached visit history the simulation starts from.
 ``simulate``
     Run the scheduler simulation for a record synchronously and print coverage.
+    ``--post`` sends the coverage and the per-night figures to Slack as well.
 ``test-post``
     Send a short message to confirm Slack credentials and channel access.
 ``doctor``
@@ -88,6 +89,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_sim = sub.add_parser("simulate", help="Run the scheduler simulation for a record")
     p_sim.add_argument("path", help="Record file")
     p_sim.add_argument("--nights", type=int, help="Override the per-class night count")
+    p_sim.add_argument(
+        "--post",
+        action="store_true",
+        help="Post the coverage and the per-night figures to Slack when it finishes",
+    )
+    p_sim.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Render those Slack payloads to disk instead of sending them",
+    )
 
     sub.add_parser("test-post", help="Post a test message to confirm Slack access")
     sub.add_parser("doctor", help="Report what works, what does not, and how to fix it")
@@ -258,6 +269,23 @@ def _cmd_simulate(args: argparse.Namespace, config: Config) -> int:
         for path in result.nightly_plots:
             print(f"    {path}")
     print(f"  ran in {result.runtime_s / 60:.1f} min; output {result.visits_path}")
+
+    # Off by default: this is an inspection command, and it should not put
+    # anything in a channel unless that was asked for.
+    if args.post or args.dry_run:
+        from .app import post_sim_results
+        from .slackbot.client import SlackPoster
+
+        poster = SlackPoster(config, dry_run=args.dry_run)
+        sent = post_sim_results(result, config, poster, is_test=trigger.is_test)
+        if not sent:
+            print("  nothing was posted; see the log above", file=sys.stderr)
+            return 1
+        if poster.offline:
+            print(f"  {len(sent)} payload(s) written under {poster.output_dir}")
+        else:
+            for posted in sent:
+                print(f"  posted to {posted.channel} (ts={posted.ts}, {len(posted.uploaded)} file(s))")
     return 0
 
 
