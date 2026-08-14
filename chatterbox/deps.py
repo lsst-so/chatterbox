@@ -14,10 +14,86 @@ import importlib
 import logging
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
-__all__ = ["Capability", "CAPABILITIES", "require", "probe"]
+__all__ = [
+    "Capability",
+    "CAPABILITIES",
+    "require",
+    "probe",
+    "import_root",
+    "add_checkout",
+]
 
 logger = logging.getLogger(__name__)
+
+
+def import_root(checkout: str | Path | None) -> Path | None:
+    """Directory of a checkout that belongs on ``sys.path``.
+
+    Two layouts are in play and they differ:
+
+    - LSST packages put their tree under ``python/``, so ``ts_fbs_utils``
+      imports from ``<checkout>/python`` (``lsst``, ``lsst/ts`` and
+      ``lsst/ts/fbs`` are native namespace packages there, which is what lets
+      them merge with the ``lsst`` already in a science-pipelines environment).
+    - ``lsst_survey_sim`` uses a flat layout, so it imports from
+      ``<checkout>`` itself.
+
+    Parameters
+    ----------
+    checkout : `str`, `pathlib.Path`, or None
+        Checkout directory, or empty/None.
+
+    Returns
+    -------
+    root : `pathlib.Path` or None
+        The directory to add, or None when `checkout` is empty or missing.
+    """
+    # Strip before testing emptiness: a whitespace-only setting is truthy, and
+    # Path("") is Path("."), which would put the working directory on sys.path.
+    text = "" if checkout is None else str(checkout).strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_dir():
+        return None
+    nested = path / "python"
+    return nested if nested.is_dir() else path
+
+
+def add_checkout(checkout: str | Path | None, label: str = "") -> Path | None:
+    """Put a checkout's import root on ``sys.path``, once.
+
+    Parameters
+    ----------
+    checkout : `str`, `pathlib.Path`, or None
+        Checkout directory.
+    label : `str`
+        Name used in the log message.
+
+    Returns
+    -------
+    root : `pathlib.Path` or None
+        What was added, or None when there was nothing usable to add.
+
+    Notes
+    -----
+    This makes a checkout *available*; it does not shadow an already-imported
+    copy. If the same package is pip-installed and has already been imported,
+    that copy keeps winning, because a regular package's ``__path__`` is fixed
+    at import time. `chatterbox.doctor` therefore reports the file each
+    capability actually loaded from.
+    """
+    root = import_root(checkout)
+    if root is None:
+        if checkout:
+            logger.warning("%s checkout %s is not a directory; ignoring", label or "Configured", checkout)
+        return None
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+        logger.debug("Added %s to sys.path for %s", root, label or "a checkout")
+    return root
 
 
 @dataclass(frozen=True)
@@ -36,6 +112,10 @@ class Capability:
         What the capability provides, for the error message.
     consequence : `str`
         What is lost without it, so a reader can judge urgency.
+    checkout_setting : `str`
+        Config key holding a checkout path, when the package is normally used
+        from a clone rather than pip-installed. Changes the advice from
+        "pip install" to "point this setting at your checkout".
     """
 
     name: str
@@ -44,6 +124,7 @@ class Capability:
     purpose: str
     consequence: str
     extra: str = ""
+    checkout_setting: str = ""
 
 
 #: Everything optional, in the order a reader most likely cares about.
@@ -93,10 +174,11 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         name="simulation",
         modules=("lsst_survey_sim.simulate_lsst",),
-        install="a checkout of lsst_survey_sim (see sim.lsst_survey_sim)",
+        install="lsst_survey_sim",
         purpose="the scheduler simulation and the ConsDB visit fetch",
         consequence="no per-band coverage and no visit history",
         extra="",
+        checkout_setting="sim.lsst_survey_sim",
     ),
     Capability(
         name="strategy",
@@ -105,6 +187,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         purpose="reading the live ToO follow-up strategy",
         consequence="the vendored strategy snapshot is used instead, which can drift",
         extra="",
+        checkout_setting="sim.ts_fbs_utils",
     ),
 )
 

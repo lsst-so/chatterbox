@@ -31,6 +31,7 @@ import numpy as np
 
 from ..alerts import sim_nights_for
 from ..config import Config
+from ..deps import import_root
 from ..models import Trigger
 
 __all__ = [
@@ -299,7 +300,14 @@ def launch_simulation(
     # The driver needs chatterbox itself plus lsst_survey_sim, which is used
     # from a checkout rather than being pip-installed.
     repo_root = str(Path(__file__).resolve().parents[2])
-    extra_paths = [repo_root, str(Path(config.sim.lsst_survey_sim).expanduser())]
+    # ts_fbs_utils is needed as well: the scheduler config script imports
+    # lsst.ts.fbs.utils to build the ToO surveys. import_root() picks the
+    # python/ subdirectory for LSST-layout checkouts.
+    extra_paths = [repo_root]
+    for checkout in (config.sim.lsst_survey_sim, config.sim.ts_fbs_utils):
+        root = import_root(checkout)
+        if root is not None:
+            extra_paths.append(str(root))
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = os.pathsep.join([p for p in extra_paths + [existing] if p])
     # Matplotlib must not try to open a display from a background process.

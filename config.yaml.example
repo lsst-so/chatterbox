@@ -82,6 +82,11 @@ sim:
   # too, since the ConsDB fetch lives in that package.
   lsst_survey_sim: ~/Rubin-Observatory/lsst_survey_sim
   ts_config_scheduler: ~/Rubin-Observatory/ts_config_scheduler
+  # Checkout of ts_fbs_utils, which defines the ToO follow-up strategies. Its
+  # import root is <checkout>/python (LSST layout); that is handled for you.
+  # Leave empty if it is pip-installed. Without it, the vendored strategy
+  # snapshot is used, which can drift from what the scheduler runs.
+  ts_fbs_utils: ~/Rubin-Observatory/ts_fbs_utils
   # Must be the tree containing sim_baseline.
   rubin_sim_data: /sdf/group/rubin/shared/rubin_sim_data/ 
   # The visit history the simulation starts from. It is fetched from ConsDB

@@ -97,14 +97,36 @@ def _probe_interpreter(python: Path, modules) -> tuple[bool, str]:
     return False, "; ".join(detail)
 
 
-def _capability_checks() -> list[Check]:
-    """Probe every optional capability in this interpreter."""
+def _capability_checks(config: Config) -> list[Check]:
+    """Probe every optional capability in this interpreter.
+
+    Runs after `chatterbox.config.apply_environment`, so configured checkouts
+    are already on ``sys.path`` and a capability supplied by one reports as
+    available rather than missing.
+    """
     checks = []
     for capability in CAPABILITIES:
         ok, detail = probe(capability)
         fix = ""
+        notes = []
         if not ok:
-            fix = f"{sys.executable} -m pip install {capability.install}"
+            notes.append(f"Without it: {capability.consequence}.")
+            if capability.checkout_setting:
+                # These are normally used from a clone, so "pip install" is the
+                # wrong first suggestion.
+                section, _, key = capability.checkout_setting.partition(".")
+                current = getattr(getattr(config, section), key, "")
+                where = f" (currently {current!r})" if current else " (currently unset)"
+                fix = (
+                    f"Set {capability.checkout_setting} to your {capability.install} "
+                    f"checkout{where}, or pip install it into {sys.executable}"
+                )
+            else:
+                fix = f"{sys.executable} -m pip install {capability.install}"
+        elif capability.checkout_setting:
+            root = _capability_source(capability)
+            if root:
+                notes.append(f"Loaded from {root}.")
         checks.append(
             Check(
                 name=f"{capability.name}: {capability.purpose}",
@@ -112,10 +134,25 @@ def _capability_checks() -> list[Check]:
                 detail=detail or "importable",
                 fix=fix,
                 fatal=capability.name == "almanac",
-                notes=[] if ok else [f"Without it: {capability.consequence}."],
+                notes=notes,
             )
         )
     return checks
+
+
+def _capability_source(capability) -> str:
+    """Where a capability's module was imported from, for the report.
+
+    Worth showing: it distinguishes "picked up my checkout" from "found some
+    other copy", which is otherwise invisible.
+    """
+    import importlib
+
+    try:
+        module = importlib.import_module(capability.modules[0])
+    except Exception:
+        return ""
+    return getattr(module, "__file__", "") or ""
 
 
 def _data_dir_check(config: Config) -> Check:
@@ -264,7 +301,7 @@ def diagnose(config: Config) -> list[Check]:
             fatal=True,
         )
     ]
-    checks += _capability_checks()
+    checks += _capability_checks(config)
     checks.append(_data_dir_check(config))
     checks.append(_template_cache_check(config))
     checks.append(_opsim_cache_check(config))

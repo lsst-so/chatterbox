@@ -160,6 +160,11 @@ class SimConfig:
     python: str = ""
     lsst_survey_sim: str = "~/Desktop/Repos/lsst_survey_sim"
     ts_config_scheduler: str = "~/Desktop/Repos/ts_config_scheduler"
+    #: Checkout of ts_fbs_utils, which defines the ToO follow-up strategies and
+    #: is imported by the scheduler config script. Empty relies on it being
+    #: pip-installed. Its import root is ``<checkout>/python`` per the LSST
+    #: layout; that is resolved automatically.
+    ts_fbs_utils: str = ""
     #: Must be the tree containing ``sim_baseline``.
     rubin_sim_data: str = "~/RubinUtils/rubin_sim_data"
 
@@ -308,6 +313,11 @@ def apply_environment(config: Config) -> None:
     path -- which needs the almanac for sunset, moonrise and the dark-hours map
     -- runs in *this* process, so it has to be set here.
 
+    It also puts the configured ``lsst_survey_sim`` and ``ts_fbs_utils``
+    checkouts on ``sys.path``. Both are normally used from a clone rather than
+    pip-installed, and doing it here means every entry point -- the alert path,
+    ``refresh-opsim``, ``doctor`` -- sees the same thing.
+
     Call this once after loading the configuration and before anything imports
     or calls into ``rubin_scheduler``. ``get_data_dir()`` reads the variable on
     every call, so setting it at runtime is enough.
@@ -324,6 +334,21 @@ def apply_environment(config: Config) -> None:
     shell variable quietly overriding it is exactly the confusion this
     function exists to prevent. The override is logged when it happens.
     """
+    # Checkouts first: the strategy lookup and the ConsDB fetch both need them,
+    # and neither is fatal if absent.
+    from .deps import add_checkout
+
+    added = [
+        add_checkout(config.sim.lsst_survey_sim, "sim.lsst_survey_sim"),
+        add_checkout(config.sim.ts_fbs_utils, "sim.ts_fbs_utils"),
+    ]
+    if any(root is not None for root in added):
+        # The strategy lookup memoizes, so one that ran before the checkout
+        # reached sys.path would otherwise stay cached as "missing".
+        from .alerts.classes import _live_strategies
+
+        _live_strategies.cache_clear()
+
     configured = (config.sim.rubin_sim_data or "").strip()
     if not configured:
         return

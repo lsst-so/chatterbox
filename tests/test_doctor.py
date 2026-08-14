@@ -75,6 +75,151 @@ def test_probe_succeeds_for_stdlib():
     assert detail == ""
 
 
+# --------------------------------------------------------------- checkouts
+
+
+def test_import_root_prefers_the_lsst_python_subdirectory(tmp_path):
+    """ts_fbs_utils imports from <checkout>/python, not <checkout>."""
+    from chatterbox.deps import import_root
+
+    checkout = tmp_path / "ts_fbs_utils"
+    (checkout / "python" / "lsst" / "ts" / "fbs" / "utils").mkdir(parents=True)
+    assert import_root(checkout) == checkout / "python"
+
+
+def test_import_root_uses_the_checkout_for_a_flat_layout(tmp_path):
+    """lsst_survey_sim imports from <checkout> itself."""
+    from chatterbox.deps import import_root
+
+    checkout = tmp_path / "lsst_survey_sim"
+    (checkout / "lsst_survey_sim").mkdir(parents=True)
+    assert import_root(checkout) == checkout
+
+
+def test_import_root_ignores_empty_and_missing(tmp_path):
+    from chatterbox.deps import import_root
+
+    assert import_root("") is None
+    assert import_root(None) is None
+    assert import_root("   ") is None
+    assert import_root(tmp_path / "absent") is None
+
+
+def test_import_root_expands_user(tmp_path, monkeypatch):
+    from chatterbox.deps import import_root
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "Rubin-Observatory" / "pkg").mkdir(parents=True)
+    assert import_root("~/Rubin-Observatory/pkg") == tmp_path / "Rubin-Observatory" / "pkg"
+
+
+def test_add_checkout_makes_a_namespaced_package_importable(tmp_path, monkeypatch):
+    """The whole point: a clone on sys.path must satisfy a deep import.
+
+    The real checkout nests the package under ``python/`` with no
+    ``__init__.py`` at the ``lsst``, ``lsst/ts`` or ``lsst/ts/fbs`` levels --
+    native namespace packages, which is what lets them merge with an existing
+    ``lsst``. A unique top-level name is used here so the test exercises that
+    mechanism without colliding with a real installed copy.
+    """
+    import importlib
+    import sys
+
+    from chatterbox.deps import add_checkout
+
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    root = tmp_path / "clone" / "python"
+    pkg = root / "cbxns" / "ts" / "fbs" / "utils" / "maintel"
+    pkg.mkdir(parents=True)
+    # Only the leaf packages get __init__.py, mirroring the real layout.
+    (root / "cbxns" / "ts" / "fbs" / "utils" / "__init__.py").write_text("")
+    (pkg / "__init__.py").write_text("")
+    (pkg / "too_surveys.py").write_text("MARKER = 'from the checkout'\n")
+
+    added = add_checkout(tmp_path / "clone", "sim.ts_fbs_utils")
+    assert added == root
+
+    importlib.invalidate_caches()
+    module = importlib.import_module("cbxns.ts.fbs.utils.maintel.too_surveys")
+    assert module.MARKER == "from the checkout"
+
+    for name in [n for n in list(sys.modules) if n.split(".")[0] == "cbxns"]:
+        del sys.modules[name]
+
+
+def test_add_checkout_does_not_shadow_an_imported_copy(tmp_path, monkeypatch):
+    """A regular package already imported keeps winning; doctor says which."""
+    import sys
+
+    from chatterbox.deps import add_checkout
+
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    checkout = tmp_path / "clone"
+    (checkout / "json").mkdir(parents=True)
+    (checkout / "json" / "__init__.py").write_text("MARKER = 'shadowed'\n")
+
+    add_checkout(checkout)
+    import json
+
+    # stdlib json was imported long ago, so the checkout cannot displace it.
+    assert not hasattr(json, "MARKER")
+
+
+def test_add_checkout_is_idempotent(tmp_path, monkeypatch):
+    import sys
+
+    from chatterbox.deps import add_checkout
+
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    checkout = tmp_path / "pkg"
+    (checkout / "pkg").mkdir(parents=True)
+
+    add_checkout(checkout)
+    add_checkout(checkout)
+    assert sys.path.count(str(checkout)) == 1
+
+
+def test_add_checkout_warns_about_a_bad_path(tmp_path, caplog):
+    from chatterbox.deps import add_checkout
+
+    with caplog.at_level("WARNING"):
+        assert add_checkout(tmp_path / "absent", "sim.ts_fbs_utils") is None
+    assert "not a directory" in caplog.text
+
+
+def test_apply_environment_adds_both_checkouts(tmp_path, monkeypatch):
+    """Configured clones must reach every entry point, not just the sim."""
+    import sys
+
+    from chatterbox.config import apply_environment
+
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    survey = tmp_path / "lsst_survey_sim"
+    (survey / "lsst_survey_sim").mkdir(parents=True)
+    fbs = tmp_path / "ts_fbs_utils"
+    (fbs / "python").mkdir(parents=True)
+
+    config = Config()
+    config.sim.lsst_survey_sim = str(survey)
+    config.sim.ts_fbs_utils = str(fbs)
+    config.sim.rubin_sim_data = ""
+    apply_environment(config)
+
+    assert str(survey) in sys.path
+    assert str(fbs / "python") in sys.path
+
+
+def test_doctor_advises_the_setting_not_pip_for_checkouts(tmp_path):
+    """ "pip install a checkout" was useless advice."""
+    from chatterbox.deps import CAPABILITIES
+
+    for capability in CAPABILITIES:
+        if capability.name in ("simulation", "strategy"):
+            assert capability.checkout_setting.startswith("sim.")
+        else:
+            assert capability.checkout_setting == ""
+
+
 # ------------------------------------------------- sim interpreter resolution
 
 
