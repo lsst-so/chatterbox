@@ -10,6 +10,7 @@ from .skymap import (
     geometry_from_mask,
     localization_from_probability,
     localization_from_reward_map,
+    localization_region,
     nest_to_ring,
     pixel_corner_decs,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "geometry_from_mask",
     "localization_from_reward_map",
     "localization_from_probability",
+    "localization_region",
     "NightEvents",
     "night_events",
     "moon_separation_deg",

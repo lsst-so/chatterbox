@@ -37,6 +37,8 @@ __all__ = [
     "coverage_curve",
     "detect_pointing_columns",
     "detect_time_column",
+    "visits_overlapping",
+    "nightly_visit_maps",
 ]
 
 logger = logging.getLogger(__name__)
@@ -352,6 +354,177 @@ def band_coverage_by_epoch(
         subset = visits.loc[visits["too_epoch"] == epoch]
         per_epoch = band_coverage(subset, localization, **kwargs)
         result.epochs[int(epoch)] = per_epoch.fractions
+    return result
+
+
+def visits_overlapping(
+    visits: pd.DataFrame,
+    localization: Localization,
+    fov_radius_deg: float = FOV_RADIUS_DEG,
+    nside: int | None = None,
+    ra_col: str | None = None,
+    dec_col: str | None = None,
+    radians: bool | None = None,
+) -> pd.DataFrame:
+    """Select visits whose field of view touches the localization.
+
+    This is a wider net than `too_visits`: it catches nominal-cadence visits
+    that happen to land on the localization as well as the tagged ToO
+    follow-up, which is what you want when asking "what coverage does this
+    localization actually get".
+
+    Parameters
+    ----------
+    visits : `pandas.DataFrame`
+        All simulated visits.
+    localization : `Localization`
+        Localization to test against. The region is the one its contour
+        encloses, via `chatterbox.astro.skymap.localization_region`, so the
+        selection agrees with what the plots show.
+    fov_radius_deg : `float`
+        Field-of-view radius. A visit counts as overlapping when its disc
+        intersects the region.
+    nside : `int`, optional
+        Resolution for the overlap test. Defaults to the localization's.
+    ra_col, dec_col, radians : optional
+        Pointing columns and units, detected when omitted.
+
+    Returns
+    -------
+    selected : `pandas.DataFrame`
+        The overlapping rows, in input order.
+
+    Notes
+    -----
+    Rather than a disc query per visit, the region is dilated once by the
+    field-of-view radius and each visit is then a single pixel lookup: a visit
+    overlaps exactly when its boresight falls inside the dilated region. That
+    turns an O(visits x pixels) scan into one dilation plus O(visits).
+    """
+    if ra_col is None or dec_col is None:
+        detected_ra, detected_dec, detected_radians = detect_pointing_columns(visits)
+        ra_col = ra_col or detected_ra
+        dec_col = dec_col or detected_dec
+        if radians is None:
+            radians = detected_radians
+    elif radians is None:
+        radians = True
+
+    from ..astro.skymap import localization_region
+
+    nside = nside or localization.nside
+    region = np.flatnonzero(localization_region(localization, nside))
+    if region.size == 0:
+        logger.warning("Localization region is empty; no visit can overlap it")
+        return visits.iloc[:0].copy()
+
+    dilated = np.zeros(hp.nside2npix(nside), dtype=bool)
+    radius = np.radians(fov_radius_deg)
+    # pix2vec returns (x, y, z) arrays; transpose to one vector per pixel.
+    for vec in np.array(hp.pix2vec(nside, region)).T:
+        dilated[hp.query_disc(nside, vec, radius, inclusive=True)] = True
+
+    ra = np.asarray(visits[ra_col], dtype=float)
+    dec = np.asarray(visits[dec_col], dtype=float)
+    if radians:
+        ra, dec = np.degrees(ra), np.degrees(dec)
+    finite = np.isfinite(ra) & np.isfinite(dec)
+
+    overlaps = np.zeros(len(visits), dtype=bool)
+    pixels = hp.ang2pix(nside, ra[finite], dec[finite], lonlat=True)
+    overlaps[finite] = dilated[pixels]
+
+    selected = visits.loc[overlaps].copy()
+    logger.info(
+        "%d of %d visits overlap the localization (FOV %.2f deg, nside %d)",
+        len(selected),
+        len(visits),
+        fov_radius_deg,
+        nside,
+    )
+    return selected
+
+
+def nightly_visit_maps(
+    visits: pd.DataFrame,
+    nside: int = 256,
+    fov_radius_deg: float = FOV_RADIUS_DEG,
+    bands: tuple[str, ...] = BANDS,
+    band_col: str = "band",
+    night_col: str = "night",
+    ra_col: str | None = None,
+    dec_col: str | None = None,
+    radians: bool | None = None,
+) -> dict[int, dict[str, np.ndarray]]:
+    """Per-night, per-band visit-count maps.
+
+    Unlike `band_coverage`, which zeroes pixels to avoid double counting, these
+    are plain counts: a pixel visited three times in a night reads 3. That is
+    what makes them useful to look at -- depth of coverage, not just extent.
+
+    Parameters
+    ----------
+    visits : `pandas.DataFrame`
+        Visits to map, normally the output of `too_visits`.
+    nside : `int`
+        Resolution of the output maps. Kept modest by default because these are
+        for plotting, not accounting.
+    fov_radius_deg : `float`
+        Field-of-view radius painted around each pointing.
+    bands : `tuple` [`str`]
+        Bands to consider.
+    band_col, night_col : `str`
+        Column names. ``night`` is the simulation's own night index;
+        ``day_obs`` is present but unpopulated for simulated visits, so it
+        cannot be used.
+    ra_col, dec_col, radians : optional
+        Pointing columns and units, detected when omitted.
+
+    Returns
+    -------
+    maps : `dict` [`int`, `dict` [`str`, `numpy.ndarray`]]
+        ``night -> band -> counts`` in RING ordering. Only nights and bands
+        with visits appear.
+    """
+    if night_col not in visits.columns:
+        raise KeyError(f"Visit table has no {night_col!r} column; have {sorted(visits.columns)[:20]}...")
+
+    if ra_col is None or dec_col is None:
+        detected_ra, detected_dec, detected_radians = detect_pointing_columns(visits)
+        ra_col = ra_col or detected_ra
+        dec_col = dec_col or detected_dec
+        if radians is None:
+            radians = detected_radians
+    elif radians is None:
+        radians = True
+
+    npix = hp.nside2npix(nside)
+    radius = np.radians(fov_radius_deg)
+    band_values = visits[band_col].astype(str)
+
+    result: dict[int, dict[str, np.ndarray]] = {}
+    for night, night_rows in visits.groupby(night_col):
+        per_band: dict[str, np.ndarray] = {}
+        for band in bands:
+            rows = night_rows.loc[band_values.loc[night_rows.index] == band]
+            if rows.empty:
+                continue
+            ra, dec = _pointings(rows, ra_col, dec_col, radians)
+            if ra.size == 0:
+                continue
+            counts = np.zeros(npix, dtype=np.int32)
+            for one_ra, one_dec in zip(ra, dec):
+                idx = hp.query_disc(nside, hp.ang2vec(one_ra, one_dec, lonlat=True), radius, inclusive=True)
+                counts[idx] += 1
+            per_band[band] = counts
+        if per_band:
+            result[int(night)] = per_band
+
+    logger.info(
+        "Built visit-count maps for %d night(s) at nside %d",
+        len(result),
+        nside,
+    )
     return result
 
 

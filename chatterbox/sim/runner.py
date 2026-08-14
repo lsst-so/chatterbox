@@ -12,7 +12,9 @@ The job directory is the interface between the two processes:
 ``job.json``         Everything the driver needs: alert type, nights, paths.
 ``reward_map.npy``   The producer's boolean reward map, NESTED at its nside.
 ``sim.log``          Driver stdout and stderr.
-``visits.h5``        Simulated observations (written by the driver).
+``visits.db``        Opsim database: the visit history plus the simulated
+                     visits (written by the driver).
+``*_night*.png``     Per-night, per-band simulated visit counts.
 ``result.json``      Coverage results and status (written by the driver).
 ===================  =========================================================
 """
@@ -158,7 +160,11 @@ class SimResult:
     any_band: float = 0.0
     #: "probability" or "area" -- whether coverage is a real probability.
     quantity: str = "area"
+    #: Visits the simulation itself scheduled.
     total_visits: int = 0
+    #: Rows in the saved database, which also contains the ConsDB history the
+    #: simulation started from.
+    archive_visits: int = 0
     too_visits: int = 0
     visits_path: str | None = None
     curve_plot: str | None = None
@@ -167,6 +173,18 @@ class SimResult:
     #: Provenance of the visit history the simulation started from, including
     #: whether a stale cache had to be reused.
     opsim: str = ""
+    #: Directory the simulation ran in; every artifact lives here.
+    job_dir: str = ""
+    #: Per-night visit-count figures, and the nights they correspond to.
+    nightly_plots: list[str] = field(default_factory=list)
+    nightly_plot_nights: list[int] = field(default_factory=list)
+    #: Nights whose visits overlap the localization, before the plot cap.
+    nights_with_overlap: int = 0
+    #: Visits overlapping the localization, ToO-tagged or not.
+    overlap_visits: int = 0
+    #: How many of `overlap_visits` are tagged ToO follow-up. Counted within
+    #: the overlapping set, so it is never larger than `overlap_visits`.
+    overlap_too_visits: int = 0
     runtime_s: float = 0.0
     error: str | None = None
 

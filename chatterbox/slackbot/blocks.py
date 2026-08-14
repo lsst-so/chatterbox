@@ -25,6 +25,7 @@ from ..sim.runner import SimResult
 __all__ = [
     "build_trigger_blocks",
     "build_sim_reply_blocks",
+    "build_nightly_visits_blocks",
     "plain_text_summary",
     "MAX_SECTION_CHARS",
 ]
@@ -462,6 +463,81 @@ def build_sim_reply_blocks(result: SimResult, config: Config) -> list[dict[str, 
         notes.append(f"<{config.sim.artifact_base_url.rstrip('/')}/{name}|simulation output>")
     elif result.visits_path:
         notes.append(f"Output: `{result.visits_path}`")
+    if notes:
+        blocks.append(_context(" -- ".join(notes)))
+    return blocks
+
+
+def build_nightly_visits_blocks(result: SimResult, config: Config) -> list[dict[str, Any]]:
+    """Blocks for the nightly visit-coverage post.
+
+    This starts its own Slack thread rather than replying in the alert's: a
+    20-night run attaches many figures, and burying them under the alert would
+    make both harder to read.
+
+    Parameters
+    ----------
+    result : `SimResult`
+        Completed simulation, with `SimResult.nightly_plots` populated.
+    config : `Config`
+        Configuration, for the artifact base URL.
+
+    Returns
+    -------
+    blocks : `list` [`dict`]
+    """
+    nights = result.nightly_plot_nights
+    shown = len(result.nightly_plots)
+    lines = [
+        f":milky_way: *Simulated nightly coverage of {result.source}* (`{result.alert_type}`)",
+        f"Per-band visit counts for every simulated night whose visits overlap the "
+        f"localization contour, with the contour drawn on each panel. "
+        f"{result.nights_with_overlap} such night(s) across the "
+        f"{result.nights}-night simulation.",
+    ]
+    if result.overlap_visits:
+        # Both numbers are counted within the overlapping set, so the split is
+        # a real split; an all-sky ToO count could exceed the overlap total.
+        other = max(result.overlap_visits - result.overlap_too_visits, 0)
+        lines.append(
+            f"{result.overlap_visits:,} visits touch the localization: "
+            f"{result.overlap_too_visits:,} ToO follow-up and "
+            f"{other:,} from the nominal cadence."
+        )
+    if nights:
+        lines.append(f"Nights shown: {', '.join(str(n) for n in nights)}.")
+    if shown < result.nights_with_overlap:
+        # Never let a cap look like "that was all there was".
+        lines.append(
+            f":scissors: Showing the first {shown} of {result.nights_with_overlap} nights "
+            f"(`sim.nightly_plots_max_nights`); the rest are in the run directory."
+        )
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"Nightly coverage: {result.source}"[:150],
+            },
+        },
+        _section("\n".join(lines)),
+    ]
+
+    # The path is the point: it is where every artifact of this run lives.
+    where = [f"*Simulation run in* `{result.job_dir or 'unknown'}`"]
+    if result.visits_path:
+        where.append(f"Visit database: `{result.visits_path}`")
+    if config.sim.artifact_base_url and result.job_dir:
+        name = result.job_dir.rstrip("/").rsplit("/", 1)[-1]
+        where.append(f"<{config.sim.artifact_base_url.rstrip('/')}/{name}|browse artifacts>")
+    blocks.append(_section("\n".join(where)))
+
+    notes = []
+    if result.opsim:
+        notes.append(f"Visit history: {result.opsim}")
+    if result.band_scheduler:
+        notes.append(f"Filter carousel: {result.band_scheduler}")
     if notes:
         blocks.append(_context(" -- ".join(notes)))
     return blocks

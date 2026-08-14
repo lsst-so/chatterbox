@@ -28,6 +28,7 @@ __all__ = [
     "nest_to_ring",
     "credible_mask",
     "contour_levels",
+    "localization_region",
     "geometry_from_mask",
     "localization_from_reward_map",
     "localization_from_probability",
@@ -320,6 +321,44 @@ def contour_levels(prob_map: np.ndarray, levels=(0.5, 0.9)) -> list[float]:
     # Deduplicate: a binary map gives the same threshold for every level.
     unique = sorted(set(thresholds))
     return [t for t in unique if t > 0]
+
+
+def localization_region(localization: Localization, nside: int | None = None) -> np.ndarray:
+    """Boolean mask of the region the localization's contour encloses.
+
+    This is the counterpart to `chatterbox.plots.style.localization_levels`:
+    the same region that gets drawn, so anything selected by it agrees with
+    the picture.
+
+    Parameters
+    ----------
+    localization : `Localization`
+        Localization to reduce to a region.
+    nside : `int`, optional
+        Resolution for the mask. Defaults to the localization's own.
+
+    Returns
+    -------
+    mask : `numpy.ndarray`
+        Boolean, RING ordering.
+
+    Notes
+    -----
+    For a real probability map the region is the credible region at
+    `Localization.credible_level` -- ``prob > 0`` would be almost the whole
+    sky, since a BAYESTAR map has non-zero tails everywhere. For the
+    producer's binary reward map the weight is already uniform across its
+    credible region, so every non-zero pixel *is* the region, and taking a
+    credible fraction of it would discard part arbitrarily.
+    """
+    prob = np.asarray(localization.prob_map, dtype=float)
+    if nside is not None and prob.size != hp.nside2npix(nside):
+        # power=-2 conserves the summed weight across the resolution change.
+        prob = hp.ud_grade(prob, nside, order_in="RING", order_out="RING", power=-2)
+
+    if localization.is_probability:
+        return credible_mask(prob, localization.credible_level)
+    return prob > 0
 
 
 def geometry_from_mask(mask: np.ndarray, nside: int) -> Geometry:

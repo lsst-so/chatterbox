@@ -35,7 +35,12 @@ from .models import Trigger
 from .plots.darkhours import plot_dark_hours, region_hours_summary
 from .plots.templates import plot_template_coverage
 from .sim.runner import launch_simulation, load_sim_result
-from .slackbot.blocks import build_sim_reply_blocks, build_trigger_blocks, plain_text_summary
+from .slackbot.blocks import (
+    build_nightly_visits_blocks,
+    build_sim_reply_blocks,
+    build_trigger_blocks,
+    plain_text_summary,
+)
 from .slackbot.client import PostedMessage, SlackPoster
 
 __all__ = ["TriggerReport", "process_trigger", "run_service"]
@@ -274,6 +279,22 @@ def _start_simulation(
             poster.reply(report.posted, blocks, summary, files=files, label=f"{result.source}_sim")
         except Exception as exc:
             logger.error("Could not post the simulation reply: %s", exc)
+
+        # The per-night figures start a thread of their own: there can be many,
+        # and they would swamp the alert's thread.
+        if result.nightly_plots:
+            try:
+                nightly_blocks = build_nightly_visits_blocks(result, config)
+                poster.post(
+                    nightly_blocks,
+                    f"Simulated nightly coverage of {result.source}: "
+                    f"{len(result.nightly_plots)} night(s), run in {result.job_dir}",
+                    is_test=trigger.is_test,
+                    files=result.nightly_plots,
+                    label=f"{result.source}_nightly",
+                )
+            except Exception as exc:
+                logger.error("Could not post the nightly coverage plots: %s", exc)
 
     if sim_wait:
         finish()

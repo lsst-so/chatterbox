@@ -6,7 +6,9 @@ from .coverage import (
     band_coverage,
     band_coverage_by_epoch,
     coverage_curve,
+    nightly_visit_maps,
     too_visits,
+    visits_overlapping,
 )
 from .opsim import (
     OpsimCache,
@@ -24,6 +26,8 @@ __all__ = [
     "band_coverage",
     "band_coverage_by_epoch",
     "coverage_curve",
+    "visits_overlapping",
+    "nightly_visit_maps",
     "OpsimCache",
     "OpsimToolUnavailableError",
     "ensure_opsim",

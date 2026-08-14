@@ -187,6 +187,19 @@ class SimConfig:
     timeout_s: float = 7200.0
     #: Base URL that sim artifacts are published under, if any.
     artifact_base_url: str = ""
+
+    #: Post per-night, per-band visit-count maps for the nights whose visits
+    #: overlap the localization contour. These go to a new Slack thread of
+    #: their own rather than into the alert's thread, which a 20-night run
+    #: would otherwise flood.
+    nightly_plots: bool = True
+    #: Cap on figures, so a 50-night BBH run does not produce 50 uploads. The
+    #: number left out is stated in the post rather than silently dropped.
+    #: ``0`` means no cap.
+    nightly_plots_max_nights: int = 10
+    #: Resolution of the visit-count maps. These are for looking at, so a
+    #: modest value keeps rendering quick.
+    nightly_plots_nside: int = 256
     #: Filter carousel swap schedule, ``{"YYYY-MM-DD": ["g", "r", ...]}``.
     #:
     #: ``lsst_survey_sim.simulate_lsst.setup_band_scheduler`` hardcodes a

@@ -249,6 +249,14 @@ def _cmd_simulate(args: argparse.Namespace, config: Config) -> int:
     for band in ("u", "g", "r", "i", "z", "y"):
         print(f"    {band}: {100 * result.coverage.get(band, 0.0):6.2f}%")
     print(f"  any band: {100 * result.any_band:6.2f}%")
+    if result.nightly_plots:
+        shown = len(result.nightly_plots)
+        print(
+            f"  {shown} of {result.nights_with_overlap} night(s) whose visits overlap "
+            f"the localization plotted:"
+        )
+        for path in result.nightly_plots:
+            print(f"    {path}")
     print(f"  ran in {result.runtime_s / 60:.1f} min; output {result.visits_path}")
     return 0
 

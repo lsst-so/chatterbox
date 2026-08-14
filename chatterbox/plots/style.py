@@ -17,6 +17,9 @@ __all__ = [
     "GALACTIC_BUFFER_DEG",
     "add_galactic_plane",
     "localization_levels",
+    "localization_extent",
+    "sky_projection",
+    "MAX_ZOOM_RADIUS_DEG",
     "mark_coord",
     "BAND_COLORS",
 ]
@@ -126,17 +129,114 @@ def localization_levels(localization: Localization, levels=(0.5, 0.9)) -> list[f
     -------
     thresholds : `list` [`float`]
         Ascending, suitable for ``contour_hpx``. Empty if nothing can be drawn.
+
+    Notes
+    -----
+    A map that is *flat* inside its region -- the producer's reward map, or a
+    uniform prior -- has no density gradient to contour: asking for the level
+    enclosing 90% lands exactly on the plateau, and matplotlib then paints the
+    whole region rather than its outline. Such maps get a single level just
+    below the plateau, which traces the boundary instead.
     """
     from ..astro.skymap import contour_levels
 
-    if localization.is_probability:
-        return contour_levels(localization.prob_map, levels)
-
-    nonzero = localization.prob_map[localization.prob_map > 0]
-    if nonzero.size == 0:
+    prob = np.asarray(localization.prob_map, dtype=float)
+    positive = prob[prob > 0]
+    if positive.size == 0:
         logger.warning("Localization has no non-zero pixels; no contour will be drawn")
         return []
-    return [float(nonzero.min()) / 2.0]
+
+    # np.unique on a large map is affordable here and unambiguous.
+    flat_region = np.unique(positive).size == 1
+    if flat_region or not localization.is_probability:
+        return [float(positive.min()) / 2.0]
+
+    # Drop any level at or above the peak: a contour there encloses nothing.
+    peak = float(positive.max())
+    thresholds = [level for level in contour_levels(prob, levels) if level < peak]
+    if not thresholds:
+        return [float(positive.min()) / 2.0]
+    return thresholds
+
+
+#: A localization whose region fits inside this radius is drawn zoomed in.
+#: Beyond it, a zoom would clip and the all-sky view is the honest choice.
+MAX_ZOOM_RADIUS_DEG = 25.0
+
+
+def localization_extent(localization: Localization) -> tuple[float, float, float]:
+    """Centroid and angular size of a localization's enclosed region.
+
+    Parameters
+    ----------
+    localization : `Localization`
+        Localization to measure.
+
+    Returns
+    -------
+    ra_deg, dec_deg : `float`
+        Centroid, by vector mean so a region spanning RA 0 does not average to
+        RA 180.
+    radius_deg : `float`
+        Greatest angular distance from that centroid to any region pixel. NaN
+        when the region is empty.
+    """
+    import healpy as hp
+
+    from ..astro.skymap import localization_region
+
+    mask = localization_region(localization)
+    pixels = np.flatnonzero(mask)
+    if pixels.size == 0:
+        return float("nan"), float("nan"), float("nan")
+
+    nside = hp.get_nside(mask)
+    vectors = np.array(hp.pix2vec(nside, pixels))
+    mean = vectors.mean(axis=1)
+    norm = np.linalg.norm(mean)
+    if norm == 0:
+        return float("nan"), float("nan"), float("nan")
+    mean /= norm
+    ra, dec = hp.vec2ang(mean, lonlat=True)
+    # A dot product with the centroid separates every pixel at once.
+    cosines = np.clip(vectors.T @ mean, -1.0, 1.0)
+    radius = float(np.degrees(np.arccos(cosines.min())))
+    return float(ra[0]), float(dec[0]), radius
+
+
+def sky_projection(localization: Localization, max_zoom_radius_deg: float = MAX_ZOOM_RADIUS_DEG):
+    """Projection and keyword arguments suited to a localization's size.
+
+    A compact localization is unreadable on an all-sky map -- a 12 deg^2 patch
+    is a few screen pixels -- so it gets a zoomed frame. A large or disjoint
+    region, like a long GW arc, gets the all-sky view, because a zoom would
+    silently crop part of it.
+
+    Parameters
+    ----------
+    localization : `Localization`
+        Localization to frame.
+    max_zoom_radius_deg : `float`
+        Largest region radius still drawn zoomed in.
+
+    Returns
+    -------
+    projection : `str`
+        Projection name for ``plt.subplot``.
+    kwargs : `dict`
+        Extra keyword arguments, empty for the all-sky case.
+    """
+    import astropy.units as u
+    from astropy.coordinates import SkyCoord
+
+    ra, dec, radius = localization_extent(localization)
+    if not np.isfinite(radius) or radius > max_zoom_radius_deg:
+        return PROJECTION, {}
+    # Pad so the contour is not flush against the frame.
+    return "astro zoom", {
+        "center": SkyCoord(ra * u.deg, dec * u.deg),
+        "radius": max(radius * 1.4, 1.0) * u.deg,
+    }
 
 
 def mark_coord(ax, ra_deg: float, dec_deg: float, label: str | None = None, **kwargs) -> None:

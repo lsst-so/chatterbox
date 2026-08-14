@@ -115,7 +115,13 @@ def run_job(job_dir: Path) -> dict[str, Any]:
     from lsst_survey_sim import lsst_support, simulate_lsst
 
     from ..astro.skymap import localization_from_probability, localization_from_reward_map
-    from .coverage import band_coverage_by_epoch, coverage_curve, too_visits
+    from .coverage import (
+        band_coverage_by_epoch,
+        coverage_curve,
+        nightly_visit_maps,
+        too_visits,
+        visits_overlapping,
+    )
     from .opsim import ensure_opsim
 
     # ---------------------------------------------------------------- inputs
@@ -229,17 +235,30 @@ def run_job(job_dir: Path) -> dict[str, Any]:
         keep_rewards=False,
     )
 
-    visits_path = job_dir / "visits.h5"
-    # save_opsim is used rather than rubin_sim's sim_archive helpers, which
-    # require rubin_sim >= 2.6 and are absent in the pinned environment.
+    # save_opsim writes a standard opsim *sqlite* database, so the file is
+    # named .db -- it used to be called .h5, which meant the artifact could not
+    # be reopened with the reader its extension implied. save_opsim is used
+    # rather than rubin_sim's sim_archive helpers, which require rubin_sim
+    # >= 2.6 and are absent in the pinned environment.
+    visits_path = job_dir / "visits.db"
     try:
-        visits = lsst_support.save_opsim(observatory, observations, initial_opsim, str(visits_path))
+        combined = lsst_support.save_opsim(observatory, observations, initial_opsim, str(visits_path))
     except Exception as exc:
         logger.warning("save_opsim failed (%s); falling back to a plain DataFrame", exc)
-        visits = pd.DataFrame(observations)
-        visits.to_hdf(visits_path, key="visits")
+        visits_path = job_dir / "visits.h5"
+        combined = pd.DataFrame(observations)
+        combined.to_hdf(visits_path, key="visits")
+
+    # Every measurement below uses the *simulated* visits only. save_opsim
+    # deliberately concatenates the ConsDB history with the new observations,
+    # so `combined` reaches back over the whole survey -- counting those as
+    # simulation nights produced nonsense like "33 nights out of 20 simulated".
+    # The database keeps the full picture, which is what makes it useful.
+    visits = pd.DataFrame(observations)
     result["visits_path"] = str(visits_path)
     result["total_visits"] = int(len(visits))
+    result["archive_visits"] = int(len(combined))
+    result["job_dir"] = str(job_dir)
 
     # -------------------------------------------------------------- coverage
 
@@ -292,6 +311,40 @@ def run_job(job_dir: Path) -> dict[str, Any]:
             result["curve_plot"] = str(plot_path)
     except Exception as exc:
         logger.warning("Could not render the coverage curve: %s", exc)
+
+    # ------------------------------------------------------- nightly coverage
+
+    # Deliberately every visit overlapping the localization, not just the
+    # tagged ToO follow-up: nominal-cadence visits landing on the contour
+    # contribute real coverage, and later survey passes show up here too.
+    if sim_cfg.get("nightly_plots", True):
+        try:
+            from ..plots.nightly import plot_all_nights
+
+            plot_nside = int(sim_cfg.get("nightly_plots_nside", 256))
+            overlapping = visits_overlapping(visits, localization, nside=plot_nside)
+            result["overlap_visits"] = int(len(overlapping))
+            # Split *within* the overlapping set. Comparing it against the
+            # all-sky ToO count would mix two denominators and could report
+            # more follow-up visits than overlapping visits.
+            result["overlap_too_visits"] = int(len(too_visits(overlapping)))
+            if overlapping.empty:
+                logger.info("No visits overlap the localization; no nightly plots")
+            else:
+                nightly = nightly_visit_maps(overlapping, nside=plot_nside)
+                paths, plotted, total = plot_all_nights(
+                    nightly,
+                    localization,
+                    job_dir,
+                    source=source,
+                    alert_type=alert_type,
+                    max_nights=int(sim_cfg.get("nightly_plots_max_nights", 10)),
+                )
+                result["nightly_plots"] = [str(p) for p in paths]
+                result["nightly_plot_nights"] = plotted
+                result["nights_with_overlap"] = total
+        except Exception as exc:
+            logger.warning("Could not render the nightly coverage plots: %s", exc)
 
     result["status"] = "complete"
     result["runtime_s"] = time.monotonic() - started

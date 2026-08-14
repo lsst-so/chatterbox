@@ -34,6 +34,17 @@ for a full 20–50 night run):
 - **Expected fraction of the localization covered in each band**, plus a
   per-epoch breakdown, an "any band" total, and a cumulative-coverage plot.
 
+**And, from the same simulation, in a thread of its own:**
+
+- **Per-night, per-band maps of simulated visit counts** with the localization
+  contour drawn on top, one figure per night, plus the path the simulation ran
+  in and the visit database it wrote. Only nights with visits that overlap the
+  contour are plotted; every visit counts towards that, not just the tagged ToO
+  follow-up, since a nominal-cadence pass landing on the localization covers it
+  just as well. These get their own thread rather than the alert's, which a
+  20-night run would otherwise flood; set `sim.nightly_plots: false` to turn
+  them off.
+
 ## Install
 
 `chatterbox` needs `rubin_scheduler` for the almanac, plus `healpy`,
@@ -160,6 +171,10 @@ Run just the simulation for a record and print per-band coverage:
 python -m chatterbox.cli simulate tests/data/gw_case_b.json --nights 3
 ```
 
+The job directory it prints holds everything the simulation produced: the opsim
+database of visits, the cumulative-coverage plot, and the per-night visit-count
+figures, so the sim can be inspected without going through Slack.
+
 ## The one thing to understand: area vs probability
 
 The producer's output record carries exactly nine fields. It computes FAR,
@@ -194,11 +209,13 @@ chatterbox/
   ingest/         record decoding, transports, GraceDB enrichment
   alerts/         alert_type -> messenger, criteria, follow-up strategy
   astro/          skymaps, almanac, dark hours, template coverage
-  plots/          dark-hours map, template panels, coverage curve
+  plots/          dark-hours map, template panels, coverage curve,
+                  per-night visit counts
   sim/            simulation driver, per-band coverage
   slackbot/       Block Kit construction, delivery
   app.py          two-stage orchestration
-  cli.py          serve | replay | refresh-templates | simulate | test-post
+  cli.py          serve | replay | refresh-templates | refresh-opsim |
+                  simulate | test-post | doctor
 scripts/
   make_fixture.py generate realistic record fixtures from real skymaps
 ```
@@ -213,7 +230,7 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 .venv/bin/python -m pytest
 ```
 
-281 tests, no network access required. Notable checks:
+313 tests, no network access required. Notable checks:
 
 - The dark-hours map is validated against `astropy`'s full `AltAz` transform —
   an independent code path from the fast approximation used in production —
@@ -224,6 +241,10 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
   is a test failure.
 - Every `alert_type` the producer can emit is checked to have a messenger, a
   strategy, and a night count.
+- The nightly plots select on the *credible region*, not on every non-zero
+  pixel: a real BAYESTAR map has faint tails almost everywhere, and selecting
+  on those would both match visits far outside the contour and make the
+  overlap test crawl over the whole sky.
 
 ## Known limitations
 

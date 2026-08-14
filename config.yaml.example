@@ -114,6 +114,19 @@ sim:
   #  "2026-04-21": ["g", "r", "i", "z", "y"]
   band_swap_end_date: ""
 
+  # Per-night, per-band maps of simulated visit counts with the localization
+  # contour drawn on top, posted to a Slack thread of their own. Only nights
+  # whose visits overlap the contour are plotted -- including nominal-cadence
+  # visits, not just the tagged ToO follow-up, since those cover real
+  # localization area too.
+  nightly_plots: true
+  # Cap on the number of figures, so a 50-night BBH run does not produce 50
+  # uploads. 0 means no cap. The count dropped is stated in the message.
+  nightly_plots_max_nights: 10
+  # Resolution of the count maps. 256 is ~0.05 deg^2 per pixel, fine enough to
+  # resolve the 1.75 deg field of view.
+  nightly_plots_nside: 256
+
 paths:
   work_dir: ~/.chatterbox/work
 
