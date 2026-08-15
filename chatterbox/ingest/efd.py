@@ -314,35 +314,57 @@ class EfdTooAlertSource(TooAlertSource):
         logger.debug("EFD client does not name its instance; reporting the configured name")
 
     def _build_client(self) -> Any:
-        """Construct an EFD client, preferring the summit helper."""
+        """Construct an EFD client, preferring the summit helper.
+
+        An explicit `efd_name` is a request for exactly that instance, so it is
+        built directly with `lsst_efd_client.EfdClient` rather than through
+        `makeEfdClient`: that helper's only way to pick an instance is to
+        auto-detect the host's own site (or, given any truthy first argument,
+        return a hardcoded ``testing`` instance) -- it has no parameter that
+        means "open this specific named instance", so passing `efd_name`
+        through it is silently ignored rather than honoured. `makeEfdClient` is
+        used only for the auto-detecting case, an empty `efd_name`.
+
+        `db_name` is passed at construction time in both cases. Setting it as
+        a plain attribute afterward -- which is what a client handed in via
+        `client=` still needs, since a test double has no constructor to steer
+        -- has no effect on a real `EfdClient`: it only reads its private
+        `_db_name`, so a client built without the right `db_name` silently
+        queries the default database and never finds the alert topic.
+        """
         name = (self.efd_name or "").strip()
         try:
-            from lsst.summit.utils.efdUtils import makeEfdClient
-
-            client = makeEfdClient(name) if name else makeEfdClient()
-            self._note_site(client)
-            logger.info(
-                "Opened the %s EFD via lsst.summit.utils (ingest.efd_name=%r)",
-                self.site,
-                name,
-            )
+            from lsst_efd_client import EfdClient
         except ImportError:
-            try:
-                from lsst_efd_client import EfdClient
-            except ImportError as exc:  # pragma: no cover - optional dependency
+            EfdClient = None  # noqa: N806
+
+        if name:
+            if EfdClient is None:
+                raise ImportError(
+                    "EFD ingest requires lsst-efd-client (pip install lsst-efd-client) "
+                    "to open a named EFD instance"
+                )
+            client = EfdClient(name, db_name=self.database)
+            self._note_site(client)
+            logger.info("Opened the %s EFD via lsst_efd_client (ingest.efd_name=%r)", self.site, name)
+            return client
+
+        try:
+            from lsst.summit.utils.efdUtils import makeEfdClient
+        except ImportError as exc:
+            if EfdClient is None:
                 raise ImportError(
                     "EFD ingest requires lsst-efd-client (pip install lsst-efd-client), "
                     "or lsst.summit.utils on an RSP host"
                 ) from exc
-            if not name:
-                raise ValueError(
-                    "ingest.efd_name must name an EFD instance (summit_efd, usdf_efd, "
-                    "idf_efd, base_efd) when lsst.summit.utils is not available to pick "
-                    "a default for this host"
-                )
-            client = EfdClient(name)
-            self._note_site(client)
-            logger.info("Opened the %s EFD via lsst_efd_client", self.site)
+            raise ValueError(
+                "ingest.efd_name must name an EFD instance (summit_efd, usdf_efd, "
+                "idf_efd, base_efd) when lsst.summit.utils is not available to pick "
+                "a default for this host"
+            ) from exc
+        client = makeEfdClient(databaseName=self.database)
+        self._note_site(client)
+        logger.info("Opened the %s EFD via lsst.summit.utils (host default)", self.site)
         return client
 
     def _ensure_client(self) -> Any:
