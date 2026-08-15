@@ -150,6 +150,15 @@ wrong produces a plausible-looking wrong answer rather than an error:
   counted, logged and forced to False; a row whose pixels are *all* null is
   rejected rather than posted as an empty localization.
 
+**Which EFD is being read is always stated**, because `ingest.efd_name` may be
+empty — `lsst.summit.utils` then picks an instance for the host, and the
+configuration alone cannot say which. The site is resolved from the client once
+it connects and appears in the startup log (`Watching the summit_efd EFD for
+lsst.scimma.too_alert (database lsst.scimma) …`), on every record's metadata,
+and in the failure posted to Slack, so "monitoring stopped" names the site that
+stopped. If the client opens a different instance from the configured one, that
+disagreement is logged rather than silently preferred.
+
 `ingest.efd_lookback_s` is `0` by default, so only alerts arriving after startup
 are posted. chatterbox keeps no record of what it has already sent, so anything
 inside a longer lookback window is re-posted after a restart.
@@ -352,7 +361,7 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 .venv/bin/python -m pytest
 ```
 
-393 tests, no network access required. Notable checks:
+398 tests, no network access required. Notable checks:
 
 - The dark-hours map is validated against `astropy`'s full `AltAz` transform —
   an independent code path from the fast approximation used in production —

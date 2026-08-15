@@ -532,12 +532,16 @@ def run_service(config: Config, paths=None, run_sim: bool = True) -> int:
     except Exception as exc:
         # The stream itself failed -- the EFD went away, credentials expired,
         # the broker dropped us. The service is about to stop consuming alerts,
-        # which is precisely the thing nobody would otherwise notice.
+        # which is precisely the thing nobody would otherwise notice. Name what
+        # stopped as specifically as the source can: "the summit_efd EFD" is
+        # actionable in a way that "efd" is not.
+        describe = getattr(source, "describe", None)
+        origin = describe() if callable(describe) else config.ingest.kind
         post_failure(
             f"monitoring for ToO alerts ({config.ingest.kind})",
             exc,
             poster,
-            origin=str(config.ingest.kind),
+            origin=str(origin),
         )
         raise
     finally:

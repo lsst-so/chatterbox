@@ -252,6 +252,9 @@ class EfdTooAlertSource(TooAlertSource):
         self._client = client
         self._owns_client = client is None
         self._prepared = False
+        #: Instance the client actually resolved to, which is the only way to
+        #: know which site an empty ``efd_name`` picked. Filled on connect.
+        self._resolved_site: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._watermark: Time | None = None
         # Influx range queries are inclusive at the boundary, so the row that
@@ -263,6 +266,53 @@ class EfdTooAlertSource(TooAlertSource):
 
     # ------------------------------------------------------------- plumbing
 
+    @property
+    def site(self) -> str:
+        """Which EFD instance this source reads.
+
+        Resolved from the client once it is open, because ``efd_name`` may be
+        empty -- ``lsst.summit.utils`` then picks an instance for the host, and
+        the configuration alone cannot say which. Before connecting, and for a
+        client that does not name itself, this falls back to what was asked
+        for, and says so rather than inventing a site.
+        """
+        if self._resolved_site:
+            return self._resolved_site
+        configured = (self.efd_name or "").strip()
+        return configured or "unknown (the host default)"
+
+    def describe(self) -> str:
+        """One line naming the site, database and topic being polled.
+
+        Used in the startup log, on every record's metadata, and in the failure
+        posted to Slack, so "monitoring stopped" always says *what* stopped.
+        """
+        return f"{self.topic} on {self.site} (database {self.database})"
+
+    def _note_site(self, client: Any) -> None:
+        """Record the instance the client resolved to, if it names itself.
+
+        The client wins over the configuration, because it is what is actually
+        being read. A disagreement is worth a warning rather than a silent
+        preference: it means the configured name did not take effect.
+        """
+        for attribute in ("efd_name", "name", "site"):
+            value = getattr(client, attribute, None)
+            if isinstance(value, str) and value.strip():
+                self._resolved_site = value.strip()
+                configured = (self.efd_name or "").strip()
+                if configured and configured != self._resolved_site:
+                    logger.warning(
+                        "ingest.efd_name is %r but the client opened %r; reading %r",
+                        configured,
+                        self._resolved_site,
+                        self._resolved_site,
+                    )
+                return
+        # Not fatal: the configured name is still reported, and a client that
+        # keeps its instance private is not something to fail a poll over.
+        logger.debug("EFD client does not name its instance; reporting the configured name")
+
     def _build_client(self) -> Any:
         """Construct an EFD client, preferring the summit helper."""
         name = (self.efd_name or "").strip()
@@ -270,7 +320,12 @@ class EfdTooAlertSource(TooAlertSource):
             from lsst.summit.utils.efdUtils import makeEfdClient
 
             client = makeEfdClient(name) if name else makeEfdClient()
-            logger.info("Opened EFD client via lsst.summit.utils (%s)", name or "default")
+            self._note_site(client)
+            logger.info(
+                "Opened the %s EFD via lsst.summit.utils (ingest.efd_name=%r)",
+                self.site,
+                name,
+            )
         except ImportError:
             try:
                 from lsst_efd_client import EfdClient
@@ -286,7 +341,8 @@ class EfdTooAlertSource(TooAlertSource):
                     "a default for this host"
                 )
             client = EfdClient(name)
-            logger.info("Opened EFD client via lsst_efd_client (%s)", name)
+            self._note_site(client)
+            logger.info("Opened the %s EFD via lsst_efd_client", self.site)
         return client
 
     def _ensure_client(self) -> Any:
@@ -304,9 +360,12 @@ class EfdTooAlertSource(TooAlertSource):
         # Outside the branch above so it applies to a client handed in as well:
         # which database to read is this source's business, and the alerts are
         # not in the default one. A client left pointing at the default returns
-        # nothing at all rather than complaining.
-        if self.database and not self._prepared:
-            self._client.db_name = self.database
+        # nothing at all rather than complaining. The same goes for the site --
+        # a client supplied by a caller is as worth naming as one built here.
+        if not self._prepared:
+            self._note_site(self._client)
+            if self.database:
+                self._client.db_name = self.database
             self._prepared = True
         return self._client
 
@@ -345,16 +404,18 @@ class EfdTooAlertSource(TooAlertSource):
         return fresh
 
     def __iter__(self) -> Iterator[tuple[dict[str, Any], dict[str, Any]]]:
-        origin = f"{self.topic} on {self.efd_name or 'the default EFD'}"
         # Connect before the retry loop: a missing lsst-efd-client or a
         # misconfigured instance name is permanent, and retrying it five times
-        # only delays saying so by a minute.
+        # only delays saying so by a minute. It also resolves the site, so
+        # everything below can name it.
         self._ensure_client()
+        origin = self.describe()
         # Start the window before now when asked, so an alert that arrived
         # during a restart is not missed.
         self._watermark = Time.now() - TimeDelta(self.lookback_s, format="sec")
         logger.info(
-            "Watching %s (database %s) from %s, every %.0f s",
+            "Watching the %s EFD for %s (database %s) from %s, every %.0f s",
+            self.site,
             self.topic,
             self.database,
             self._watermark.isot,
@@ -393,6 +454,8 @@ class EfdTooAlertSource(TooAlertSource):
                     continue
                 yield record, {
                     "transport": "efd",
+                    "site": self.site,
+                    "database": self.database,
                     "topic": self.topic,
                     "origin": origin,
                     "efd_time": str(index),

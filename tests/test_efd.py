@@ -55,11 +55,14 @@ def frame_of(rows):
 class FakeEfdClient:
     """An EFD client that returns canned frames and records its calls."""
 
-    def __init__(self, frames, error=None):
+    def __init__(self, frames, error=None, efd_name="summit_efd"):
         self.frames = list(frames)
         self.error = error
         self.calls = []
         self.db_name = "efd"
+        # A real client knows which instance it opened, and that is what the
+        # source reports.
+        self.efd_name = efd_name
         self.closed = False
 
     async def select_time_series(self, topic, fields, start, end, *args, **kwargs):
@@ -216,14 +219,67 @@ def test_the_source_queries_the_configured_topic_and_database():
 
 def test_delivered_records_carry_their_provenance():
     record = make_record()
-    client = FakeEfdClient([frame_of([flatten(record)])])
+    client = FakeEfdClient([frame_of([flatten(record)])], efd_name="usdf_efd")
     source = EfdTooAlertSource(efd_name="usdf_efd", poll_interval_s=0.0, once=True, client=client)
 
     ((_, metadata),) = list(source)
     assert metadata["transport"] == "efd"
     assert metadata["topic"] == EFD_TOPIC
+    assert metadata["site"] == "usdf_efd", "which EFD an alert came from is provenance"
+    assert metadata["database"] == EFD_DATABASE
     assert "usdf_efd" in metadata["origin"]
     assert str(WRITE_TIME.year) in metadata["efd_time"]
+
+
+def test_the_site_is_named_before_anything_is_polled(caplog):
+    """An operator reading the log has to see which EFD is being watched."""
+    client = FakeEfdClient([pd.DataFrame()], efd_name="usdf_efd")
+    source = EfdTooAlertSource(efd_name="usdf_efd", poll_interval_s=0.0, once=True, client=client)
+    with caplog.at_level("INFO"):
+        list(source)
+    assert "Watching the usdf_efd EFD" in caplog.text
+    assert EFD_DATABASE in caplog.text
+
+
+def test_the_site_is_taken_from_the_client_not_the_config():
+    """An empty efd_name lets the host pick, and only the client then knows.
+
+    ``lsst.summit.utils`` resolves a default instance per host, so reporting
+    the configured string would say "unknown" on exactly the deployment where
+    the answer matters most.
+    """
+    client = FakeEfdClient([pd.DataFrame()])
+    client.efd_name = "summit_efd"
+    source = EfdTooAlertSource(efd_name="", poll_interval_s=0.0, once=True, client=client)
+
+    assert source.site == "unknown (the host default)", "nothing is known before connecting"
+    list(source)
+    assert source.site == "summit_efd"
+    assert source.describe() == f"{EFD_TOPIC} on summit_efd (database {EFD_DATABASE})"
+
+
+def test_an_anonymous_client_reports_what_was_configured():
+    """A client that does not name itself must not make the site a lie."""
+    client = FakeEfdClient([pd.DataFrame()])
+    del client.efd_name  # nothing to resolve from
+    source = EfdTooAlertSource(efd_name="base_efd", poll_interval_s=0.0, once=True, client=client)
+    list(source)
+    assert source.site == "base_efd"
+
+
+def test_a_site_that_disagrees_with_the_config_is_flagged(caplog):
+    """Reading the wrong EFD quietly is worse than reading it loudly."""
+    client = FakeEfdClient([pd.DataFrame()], efd_name="summit_efd")
+    source = EfdTooAlertSource(efd_name="usdf_efd", poll_interval_s=0.0, once=True, client=client)
+    with caplog.at_level("WARNING"):
+        list(source)
+    assert "ingest.efd_name is 'usdf_efd'" in caplog.text
+    assert source.site == "summit_efd", "the client is what is actually being read"
+
+
+def test_the_description_names_site_database_and_topic():
+    source = EfdTooAlertSource(efd_name="idf_efd", topic="lsst.scimma.too_alert_test")
+    assert source.describe() == "lsst.scimma.too_alert_test on idf_efd (database lsst.scimma)"
 
 
 def test_an_alert_is_delivered_once_even_though_the_window_overlaps():
