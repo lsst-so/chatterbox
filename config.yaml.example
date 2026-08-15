@@ -5,6 +5,23 @@
 # default that can be omitted; secrets are never stored in this file, only the
 # name of the environment variable to read them from.
 
+# Which Rubin site this instance runs at. One line instead of three, because
+# the same site is named differently by each library:
+#
+#   site       ingest.efd_name   sim.opsim_site   sim.opsim_tokenfile
+#   ---------  ----------------  ---------------  -------------------
+#   summit     summit_efd        summit           ~/.lsst/summit_rsp
+#   base       base_efd          base             ~/.lsst/base_rsp
+#   usdf       usdf_efd          usdf             ~/.lsst/usdf_rsp
+#   usdf-dev   usdf_efd          usdf-dev         ~/.lsst/usdf_rsp
+#
+# Any of those three set explicitly below still wins, and both what the site
+# supplied and what was overridden are logged at startup. Leave empty to keep
+# each setting at its own default. An unknown name is an error rather than a
+# silent no-op. There is no "idf": idf_efd exists, but rubin_nights has no
+# ConsDB endpoint for it, so set ingest.efd_name directly for that.
+site: ""
+
 slack:
   # The bot token must be in this environment variable. A bot token is required
   # rather than an incoming webhook, because webhooks cannot upload the plots.

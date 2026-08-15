@@ -290,6 +290,30 @@ def _slack_token_check(config: Config) -> Check:
     )
 
 
+def _site_check(config: Config) -> Check:
+    """Which site's services this instance is pointed at.
+
+    Three settings name the same site in three vocabularies, so they are shown
+    together: a config that polls one site's EFD while pulling visit history
+    from another works perfectly well and is still wrong.
+    """
+    where = [
+        f"EFD {config.ingest.efd_name or 'host default'}",
+        f"ConsDB {config.sim.opsim_site}",
+        f"token {config.sim.opsim_tokenfile}",
+    ]
+    if config.site:
+        return Check(name="site", ok=True, detail=f"{config.site}: " + ", ".join(where))
+    return Check(
+        name="site",
+        ok=True,
+        detail="not set; " + ", ".join(where),
+        notes=[
+            "Set the top-level 'site' (summit, base, usdf, usdf-dev) to fill all " "three from one place.",
+        ],
+    )
+
+
 def diagnose(config: Config) -> list[Check]:
     """Run every diagnostic and return the results in report order."""
     checks: list[Check] = [
@@ -301,6 +325,7 @@ def diagnose(config: Config) -> list[Check]:
             fatal=True,
         )
     ]
+    checks.append(_site_check(config))
     checks += _capability_checks(config)
     checks.append(_data_dir_check(config))
     checks.append(_template_cache_check(config))

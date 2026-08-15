@@ -352,3 +352,102 @@ def test_unwrap_handles_hop_message_shapes():
     assert _unwrap(Blob(json.dumps(record).encode()))[0]["source"] == record["source"]
     assert _unwrap(Blob(json.dumps(record)))[0]["source"] == record["source"]
     assert _unwrap(Blob(12345)) == []
+
+
+# ------------------------------------------------------------------ site
+
+
+def test_site_fills_every_setting_that_names_a_site(tmp_path):
+    """One line instead of three, which is three chances to disagree."""
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"site": "summit"}))
+    config = load_config(path)
+
+    assert config.site == "summit"
+    assert config.ingest.efd_name == "summit_efd"
+    assert config.sim.opsim_site == "summit"
+    assert config.sim.opsim_tokenfile == "~/.lsst/summit_rsp"
+
+
+def test_an_explicit_setting_beats_the_site(tmp_path, caplog):
+    """Overriding one piece of a site is normal; it must not be reverted."""
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"site": "summit", "ingest": {"efd_name": "usdf_efd"}}))
+    with caplog.at_level("INFO"):
+        config = load_config(path)
+
+    assert config.ingest.efd_name == "usdf_efd", "the file is the more deliberate statement"
+    # ...and the rest of the site still applies.
+    assert config.sim.opsim_site == "summit"
+    assert "overridden by the config file" in caplog.text
+
+
+def test_the_dashed_spelling_counts_as_explicit(tmp_path):
+    """The loader accepts dashes, so the override check has to as well."""
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"site": "usdf", "sim": {"opsim-tokenfile": "~/token"}}))
+    config = load_config(path)
+    assert config.sim.opsim_tokenfile == "~/token"
+    assert config.ingest.efd_name == "usdf_efd"
+
+
+def test_an_unknown_site_is_an_error_not_a_silent_no_op(tmp_path):
+    """A typo would otherwise leave the instance pointed somewhere else."""
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"site": "sumit"}))
+    with pytest.raises(ValueError, match="Unknown site 'sumit'"):
+        load_config(path)
+
+
+def test_the_error_lists_the_sites_and_the_way_out(tmp_path):
+    from chatterbox.config import apply_site_defaults
+
+    config = Config()
+    config.site = "idf"
+    with pytest.raises(ValueError) as caught:
+        apply_site_defaults(config)
+    message = str(caught.value)
+    for site in ("summit", "base", "usdf", "usdf-dev"):
+        assert site in message
+    assert "ingest.efd_name" in message, "idf_efd is still reachable, just not as a site"
+
+
+def test_no_site_changes_nothing(tmp_path):
+    """An existing config file must behave exactly as it did before."""
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"ingest": {"kind": "efd"}}))
+    config = load_config(path)
+
+    assert config.site == ""
+    assert config.ingest.efd_name == Config().ingest.efd_name
+    assert config.sim.opsim_site == Config().sim.opsim_site
+
+
+def test_site_is_case_and_space_insensitive(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"site": " USDF-Dev "}))
+    config = load_config(path)
+    assert config.site == "usdf-dev"
+    assert config.sim.opsim_site == "usdf-dev"
+    assert config.ingest.efd_name == "usdf_efd"
+
+
+def test_site_reaches_the_efd_source(tmp_path):
+    """The point of the setting: the poller ends up at the right instance."""
+    from chatterbox.ingest.efd import EfdTooAlertSource
+
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"site": "base"}))
+    source = make_source(load_config(path))
+    assert isinstance(source, EfdTooAlertSource)
+    assert source.efd_name == "base_efd"
+    assert "base_efd" in source.describe()
+
+
+def test_every_site_names_all_three_settings():
+    """A partial entry would leave one service pointed at another site."""
+    from chatterbox.config import _SITE_TARGETS, SITES
+
+    wanted = {key for _, key in _SITE_TARGETS}
+    for name, values in SITES.items():
+        assert set(values) == wanted, f"{name} is missing {wanted - set(values)}"

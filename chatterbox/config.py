@@ -29,12 +29,56 @@ __all__ = [
     "SimConfig",
     "PathsConfig",
     "LinksConfig",
+    "SITES",
+    "apply_site_defaults",
     "load_config",
     "apply_environment",
     "DEFAULT_CONFIG_PATHS",
 ]
 
 logger = logging.getLogger(__name__)
+
+#: What the top-level ``site`` setting supplies, per site.
+#:
+#: One deployment lives at one site, but the services it talks to are named
+#: differently by each library: an EFD instance is ``summit_efd``, the matching
+#: ConsDB site is ``summit``, and the RSP token is ``~/.lsst/summit_rsp``.
+#: Setting all three by hand is three chances to end up polling one site's EFD
+#: while pulling visit history from another -- which works, and is wrong.
+#:
+#: The ConsDB names are exactly the ones ``rubin_nights`` accepts
+#: (``rubin_nights.connections.API_ENDPOINTS``). ``idf`` is deliberately not
+#: here: an ``idf_efd`` exists, but ``rubin_nights`` has no ConsDB endpoint for
+#: it, so set ``ingest.efd_name`` directly rather than implying a whole site.
+SITES: dict[str, dict[str, str]] = {
+    "summit": {
+        "efd_name": "summit_efd",
+        "opsim_site": "summit",
+        "opsim_tokenfile": "~/.lsst/summit_rsp",
+    },
+    "base": {
+        "efd_name": "base_efd",
+        "opsim_site": "base",
+        "opsim_tokenfile": "~/.lsst/base_rsp",
+    },
+    "usdf": {
+        "efd_name": "usdf_efd",
+        "opsim_site": "usdf",
+        "opsim_tokenfile": "~/.lsst/usdf_rsp",
+    },
+    "usdf-dev": {
+        "efd_name": "usdf_efd",
+        "opsim_site": "usdf-dev",
+        "opsim_tokenfile": "~/.lsst/usdf_rsp",
+    },
+}
+
+#: Where each `SITES` entry lands, as ``(section, key)``.
+_SITE_TARGETS = (
+    ("ingest", "efd_name"),
+    ("sim", "opsim_site"),
+    ("sim", "opsim_tokenfile"),
+)
 
 DEFAULT_CONFIG_PATHS = (
     Path("config.yaml"),
@@ -266,6 +310,13 @@ class LinksConfig:
 class Config:
     """Top-level chatterbox configuration."""
 
+    #: Which Rubin site this instance runs at: ``summit``, ``base``, ``usdf``
+    #: or ``usdf-dev``. Supplies `SITES` defaults for the settings that name a
+    #: site in three different vocabularies -- the EFD instance, the ConsDB
+    #: site and the RSP token file. Any of those stated explicitly in the
+    #: config file still wins. Empty means "no site", leaving each setting at
+    #: its own default, which is what an existing config file gets.
+    site: str = ""
     slack: SlackConfig = field(default_factory=SlackConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
     dark_hours: DarkHoursConfig = field(default_factory=DarkHoursConfig)
@@ -313,6 +364,78 @@ def _from_mapping(cls: type, data: Any) -> Any:
     return cls(**kwargs)
 
 
+def _was_stated(data: Any, section: str, key: str) -> bool:
+    """Did the config file set ``section.key`` itself?
+
+    Only settings the file is silent about are filled in from the site, so an
+    explicit value is never overwritten by one inferred from somewhere else.
+    The dashed spelling the loader accepts counts too.
+    """
+    if not isinstance(data, dict):
+        return False
+    block = data.get(section)
+    if block is None:
+        block = data.get(section.replace("_", "-"))
+    if not isinstance(block, dict):
+        return False
+    return any(str(name).replace("-", "_") == key for name in block)
+
+
+def apply_site_defaults(config: Config, stated: Any = None) -> Config:
+    """Fill the site-dependent settings from the top-level ``site``.
+
+    Parameters
+    ----------
+    config : `Config`
+        Configuration to complete, in place.
+    stated : `dict`, optional
+        The raw YAML mapping it was built from, used to tell "the file set
+        this" from "this is the field default". Without it every site-dependent
+        setting is filled, which is what a caller constructing a `Config` by
+        hand wants.
+
+    Returns
+    -------
+    config : `Config`
+        The same object, for convenience.
+
+    Raises
+    ------
+    ValueError
+        When ``site`` is not one of `SITES`. A typo here would otherwise be
+        silent and leave the instance pointed at whichever site the defaults
+        name, so it fails at startup instead.
+    """
+    site = (config.site or "").strip().lower()
+    if not site:
+        return config
+    if site not in SITES:
+        raise ValueError(
+            f"Unknown site {config.site!r}; expected one of {', '.join(sorted(SITES))}. "
+            "For an EFD with no matching ConsDB endpoint, such as idf_efd, set "
+            "ingest.efd_name directly and leave site unset."
+        )
+
+    config.site = site
+    defaults = SITES[site]
+    applied, kept = [], []
+    for section, key in _SITE_TARGETS:
+        if _was_stated(stated, section, key):
+            kept.append(f"{section}.{key}={getattr(getattr(config, section), key)!r}")
+            continue
+        setattr(getattr(config, section), key, defaults[key])
+        applied.append(f"{section}.{key}={defaults[key]}")
+
+    if applied:
+        logger.info("site=%s supplies %s", site, ", ".join(applied))
+    if kept:
+        # Not a warning: overriding one setting for a site is a normal thing to
+        # want. It is worth saying so, though, because a half-overridden site
+        # is exactly the state this setting exists to make visible.
+        logger.info("site=%s overridden by the config file for %s", site, ", ".join(kept))
+    return config
+
+
 def load_config(path: str | Path | None = None) -> Config:
     """Load configuration from YAML, falling back to defaults.
 
@@ -336,7 +459,10 @@ def load_config(path: str | Path | None = None) -> Config:
             data = yaml.safe_load(f) or {}
         # Field names use snake_case; accept the dashed spelling too so the
         # YAML can match the style used by forward_alerts.py's own config.
-        return _from_mapping(Config, data)
+        config = _from_mapping(Config, data)
+        # `data` is passed through so an explicit setting is not replaced by
+        # one inferred from `site`.
+        return apply_site_defaults(config, stated=data)
 
     if path is not None:
         raise FileNotFoundError(f"Config file not found: {path}")

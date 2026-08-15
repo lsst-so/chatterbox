@@ -119,6 +119,35 @@ The token needs the `chat:write` and `files:write` scopes. A bot token is
 required rather than an incoming webhook because webhooks cannot upload files,
 and every post carries plots.
 
+**Say which site this instance runs at**, in one line:
+
+```yaml
+site: summit     # summit | base | usdf | usdf-dev
+```
+
+The same site is named differently by each library, so one setting fills all
+three rather than leaving three chances to disagree:
+
+| `site` | `ingest.efd_name` | `sim.opsim_site` | `sim.opsim_tokenfile` |
+| --- | --- | --- | --- |
+| `summit` | `summit_efd` | `summit` | `~/.lsst/summit_rsp` |
+| `base` | `base_efd` | `base` | `~/.lsst/base_rsp` |
+| `usdf` | `usdf_efd` | `usdf` | `~/.lsst/usdf_rsp` |
+| `usdf-dev` | `usdf_efd` | `usdf-dev` | `~/.lsst/usdf_rsp` |
+
+Any of the three set explicitly still wins, and both what the site supplied and
+what was overridden are logged at startup — a half-overridden site is exactly
+the state worth seeing. An unknown name is an error at startup rather than a
+silent no-op, since a typo would otherwise leave the instance quietly pointed at
+whichever site the defaults name. Leave `site` empty and each setting keeps its
+own default, which is what an existing config file gets.
+
+There is no `idf`: an `idf_efd` exists, but `rubin_nights` has no ConsDB
+endpoint for it, so set `ingest.efd_name: idf_efd` directly for that. The
+ConsDB names come from `rubin_nights.connections.API_ENDPOINTS`.
+
+`chatterbox doctor` prints the resolved site and all three values on one line.
+
 **Kafka topics are not in the defaults.** The upstream `rubin-ToO-producer`
 repository contains no real topic names either — they are purely deployment
 configuration — so `ingest.kafka_url` must be filled in for Kafka mode.
@@ -149,6 +178,9 @@ wrong produces a plausible-looking wrong answer rather than an error:
   `True`, which would silently *add* sky to the credible region. Nulls are
   counted, logged and forced to False; a row whose pixels are *all* null is
   rejected rather than posted as an empty localization.
+
+Set `ingest.efd_name` directly only to point at an instance the top-level
+`site` does not cover, or to override it.
 
 **Which EFD is being read is always stated**, because `ingest.efd_name` may be
 empty — `lsst.summit.utils` then picks an instance for the host, and the
@@ -361,7 +393,7 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 .venv/bin/python -m pytest
 ```
 
-398 tests, no network access required. Notable checks:
+407 tests, no network access required. Notable checks:
 
 - The dark-hours map is validated against `astropy`'s full `AltAz` transform —
   an independent code path from the fast approximation used in production —
@@ -392,6 +424,9 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 - Every silent-failure path posts: a dropped record, a simulation with no
   result, a crash in the posting thread, and a dead monitoring stream. The
   failure path itself is asserted never to raise.
+- Every `site` entry is checked to name all three settings, so a partial one
+  cannot leave a service pointed at another site, and an explicit setting is
+  asserted to survive the site filling in the rest.
 - `day_obs` is asserted against `rubin_nights`' own convention, and the trigger
   night against `floor(mjd − mjd_start)` — the expression `ModelObservatory`
   actually labels visits with. A separate test shows the two agree, which is
