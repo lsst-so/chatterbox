@@ -51,6 +51,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_serve = sub.add_parser("serve", help="Consume the configured alert source")
     p_serve.add_argument("--no-sim", action="store_true", help="Do not launch simulations")
+    p_serve.add_argument(
+        "--lookback",
+        type=float,
+        metavar="SECONDS",
+        help=(
+            "Reach back this many seconds before startup on the first EFD poll, "
+            "so an alert that landed just before serve started is still picked "
+            "up. Overrides ingest.efd_lookback_s. EFD source only."
+        ),
+    )
+    p_serve.add_argument(
+        "--since",
+        metavar="UTC_TIME",
+        help=(
+            "Reach back to this UTC time on the first EFD poll, e.g. "
+            "2026-08-17T01:00:00. Convenient for catching an already-injected "
+            "alert. Mutually exclusive with --lookback. EFD source only."
+        ),
+    )
 
     p_replay = sub.add_parser("replay", help="Handle one or more ToO record files")
     p_replay.add_argument("paths", nargs="+", help="Record files (.json or .avro)")
@@ -134,11 +153,47 @@ def _configure_logging(verbose: bool) -> None:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
+def _serve_lookback(args: argparse.Namespace) -> float | None:
+    """First-poll lookback in seconds from ``--lookback``/``--since``, or None.
+
+    None means "use the configured ingest.efd_lookback_s". ``--since`` is turned
+    into a lookback from the current time, because the EFD source's only knob is
+    how far before startup to reach, not an absolute start; the few seconds
+    between here and the first poll are immaterial against a lookback window.
+    """
+    since = getattr(args, "since", None)
+    lookback = getattr(args, "lookback", None)
+    if since is not None and lookback is not None:
+        raise ValueError("pass only one of --since and --lookback")
+    if lookback is not None:
+        if lookback < 0:
+            raise ValueError("--lookback must not be negative")
+        return lookback
+    if since is not None:
+        from astropy.time import Time
+
+        try:
+            start = Time(since, scale="utc")
+        except Exception as exc:
+            raise ValueError(f"could not parse --since {since!r} as a UTC time: {exc}") from exc
+        seconds = (Time.now() - start).sec
+        if seconds < 0:
+            raise ValueError(f"--since {since} is in the future")
+        return seconds
+    return None
+
+
 def _cmd_serve(args: argparse.Namespace, config: Config) -> int:
     from .app import run_service
 
     try:
-        handled = run_service(config, run_sim=not args.no_sim)
+        lookback = _serve_lookback(args)
+    except ValueError as exc:
+        print(f"serve: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        handled = run_service(config, run_sim=not args.no_sim, lookback_s=lookback)
     except Exception as exc:
         # run_service has already posted this to the channel; the operator gets
         # one line and a non-zero exit, not a traceback, since the traceback is

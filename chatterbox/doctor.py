@@ -298,7 +298,7 @@ def _site_check(config: Config) -> Check:
     from another works perfectly well and is still wrong.
     """
     where = [
-        f"EFD {config.ingest.efd_name or 'host default'}",
+        f"EFD {config.ingest.efd_name or '(unset — required)'}",
         f"ConsDB {config.sim.opsim_site}",
         f"token {config.sim.opsim_tokenfile}",
     ]

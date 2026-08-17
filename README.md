@@ -100,8 +100,9 @@ Optional extras and what they buy:
 | `kafka` | the Kafka ingest source (`hop-client`) and `.avro` records     |
 | `test`  | `pytest`, `ruff`, `black`, `isort`                             |
 
-On an RSP host `lsst.summit.utils` is already present and is used in preference,
-because it knows which EFD instance belongs to the host it is running on.
+The EFD client is opened directly as `EfdClient(efd_name, db_name="lsst.scimma")`,
+exactly as the summit analysis notebooks do, so `ingest.efd_name` must name an
+instance (the top-level `site` fills it in).
 
 ## Configure
 
@@ -163,8 +164,9 @@ to and, on a summit or USDF host, the credentials are already in place.
 The alerts are the `too_alert` measurement in the **`lsst.scimma`** InfluxDB
 database — *not* the default database an EFD client connects to, which holds the
 SAL topics, so `chatterbox` sets `db_name` on the client explicitly. It then
-polls `select_time_series` every `ingest.efd_poll_interval_s` for records
-written since the previous query.
+polls `select_time_series` every `ingest.efd_poll_interval_s` for new records,
+re-reading a short trailing window each time so nothing that arrives late is
+missed (see the ingest-lag note below).
 
 Two things about that reconstruction are worth knowing, because getting either
 wrong produces a plausible-looking wrong answer rather than an error:
@@ -182,18 +184,33 @@ wrong produces a plausible-looking wrong answer rather than an error:
 Set `ingest.efd_name` directly only to point at an instance the top-level
 `site` does not cover, or to override it.
 
-**Which EFD is being read is always stated**, because `ingest.efd_name` may be
-empty — `lsst.summit.utils` then picks an instance for the host, and the
-configuration alone cannot say which. The site is resolved from the client once
-it connects and appears in the startup log (`Watching the summit_efd EFD for
-lsst.scimma.too_alert (database lsst.scimma) …`), on every record's metadata,
-and in the failure posted to Slack, so "monitoring stopped" names the site that
-stopped. If the client opens a different instance from the configured one, that
-disagreement is logged rather than silently preferred.
+**Which EFD is being read is always stated.** The instance is resolved from the
+client once it connects and appears in the startup log (`Watching the summit_efd
+EFD for lsst.scimma.too_alert (database lsst.scimma) …`), on every record's
+metadata, and in the failure posted to Slack, so "monitoring stopped" names the
+site that stopped. If the client opens a different instance from the configured
+one, that disagreement is logged rather than silently preferred.
 
 `ingest.efd_lookback_s` is `0` by default, so only alerts arriving after startup
 are posted. chatterbox keeps no record of what it has already sent, so anything
-inside a longer lookback window is re-posted after a restart.
+inside a longer lookback window is re-posted after a restart. To catch an alert
+that landed just before you start the service — one you just injected, say —
+without changing the default, run `serve --since UTC_TIME` or `serve --lookback
+SECONDS` for that one invocation.
+
+**A record's timestamp is not when it becomes queryable.** The EFD stamps each
+record with the producer's *send* time (that is its InfluxDB time index), but
+the relay does not make it readable until some seconds — occasionally minutes —
+later. A plain forward-marching poll would sweep its window past that timestamp
+before the row appears and lose the alert with no error and no post. So every
+poll re-reads a trailing `ingest.efd_revisit_s` window (default `900`, i.e. 15
+minutes) *behind* the watermark; a late row still lands inside a query window,
+and the `(source, time)` de-dup means the overlap never posts anything twice.
+Set it comfortably above the real ingest lag — measured at ~11 s on `base_efd`,
+so the default has wide margin. The trade-off is the mirror of the lookback one:
+because the de-dup only spans a single run, a **restart** can re-post alerts
+from the last `efd_revisit_s`; lower it if that is noisy while testing, or raise
+it if the relay is ever slower than the window.
 
 A single failed query is retried; `ingest.efd_max_consecutive_errors` (5) in a
 row is treated as an outage, posted to the channel, and stops the service rather

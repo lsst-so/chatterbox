@@ -55,15 +55,34 @@ def frame_of(rows):
 class FakeEfdClient:
     """An EFD client that returns canned frames and records its calls."""
 
-    def __init__(self, frames, error=None, efd_name="summit_efd"):
+    def __init__(self, frames, error=None, efd_name="summit_efd", fields=None):
         self.frames = list(frames)
         self.error = error
         self.calls = []
+        self.field_calls = []
         self.db_name = "efd"
         # A real client knows which instance it opened, and that is what the
         # source reports.
         self.efd_name = efd_name
         self.closed = False
+        # ``get_fields`` reports the topic's field names, which the source then
+        # lists in the query. Default to the columns the canned rows carry --
+        # the fields a real topic would report -- falling back to a minimal set
+        # so a frame-less poll still has fields to ask for, exactly as a topic
+        # that already holds data always does.
+        if fields is None:
+            fields = []
+            for frame in self.frames:
+                if not frame.empty:
+                    fields = [str(c) for c in frame.columns]
+                    break
+            if not fields:
+                fields = ["source", "alert_type", "timestamp", "reward_map_nside", "reward_map0"]
+        self.fields = list(fields)
+
+    async def get_fields(self, topic):
+        self.field_calls.append(topic)
+        return list(self.fields)
 
     async def select_time_series(self, topic, fields, start, end, *args, **kwargs):
         self.calls.append({"topic": topic, "fields": fields, "start": start, "end": end})
@@ -72,6 +91,53 @@ class FakeEfdClient:
         if not self.frames:
             return pd.DataFrame()
         return self.frames.pop(0)
+
+    async def close(self):
+        self.closed = True
+
+
+class TimeAwareFakeEfdClient:
+    """A fake that honours the query window and models the relay's ingest lag.
+
+    Unlike `FakeEfdClient`, which returns canned frames regardless of the window,
+    this one filters by ``[start, end]`` on each row's own time index, and hides
+    a row until a given poll number -- the relay writing it later than its
+    timestamp. That is what a plain marching window trips over and the revisit
+    re-read is meant to survive.
+    """
+
+    def __init__(self, rows, fields=None):
+        # rows: list of (row_series, visible_from_call), 0-based poll index.
+        self.rows = list(rows)
+        self.calls = []
+        self.field_calls = []
+        self.db_name = "efd"
+        self.efd_name = "base_efd"
+        self.closed = False
+        if fields is None:
+            cols: set[str] = set()
+            for row, _ in self.rows:
+                cols.update(str(c) for c in row.index)
+            fields = sorted(cols) or ["source"]
+        self.fields = list(fields)
+
+    async def get_fields(self, topic):
+        self.field_calls.append(topic)
+        return list(self.fields)
+
+    async def select_time_series(self, topic, fields, start, end, *args, **kwargs):
+        from astropy.time import Time
+
+        poll = len(self.calls)  # this call's 0-based index
+        self.calls.append({"topic": topic, "fields": fields, "start": start, "end": end})
+        visible = []
+        for row, visible_from in self.rows:
+            when = Time(row.name.to_pydatetime())
+            if visible_from <= poll and start <= when <= end:
+                visible.append(row)
+        if not visible:
+            return pd.DataFrame()
+        return frame_of(visible)
 
     async def close(self):
         self.closed = True
@@ -212,9 +278,77 @@ def test_the_source_queries_the_configured_topic_and_database():
     assert len(delivered) == 1
     call = client.calls[0]
     assert call["topic"] == EFD_TOPIC
-    assert call["fields"] == "*", "12,288 pixel columns are not worth naming individually"
+    # The fields are listed explicitly, from get_fields, exactly as the summit
+    # notebooks issue the query: a quoted "*" is not an InfluxQL wildcard, so
+    # the old "*" matched nothing and every poll came back empty.
+    assert client.field_calls == [EFD_TOPIC], "the field list is fetched from the topic"
+    assert isinstance(call["fields"], list), "fields are named, not queried as '*'"
+    assert "source" in call["fields"] and "reward_map0" in call["fields"]
     assert client.db_name == EFD_DATABASE, "the alerts are not in the default database"
     assert call["start"] <= call["end"]
+
+
+def test_the_fields_are_named_from_get_fields_not_a_wildcard():
+    """The query lists the topic's fields, exactly as the notebooks do it.
+
+    A quoted "*" is not an InfluxQL wildcard -- the client quotes every field
+    it is handed -- so ``select_time_series(topic, "*", ...)`` asked for a field
+    literally named "*", matched nothing, and no alert was ever delivered. The
+    fix is to pass the field list ``get_fields`` reports.
+    """
+    record = make_record(instruments=["H1", "L1"])
+    row = flatten(record)
+    client = FakeEfdClient([frame_of([row])])
+    source = EfdTooAlertSource(poll_interval_s=0.0, once=True, client=client)
+
+    list(source)
+    (call,) = client.calls
+    assert call["fields"] != "*"
+    # Every field the row carries is asked for, pixels included.
+    assert set(row.index) <= set(call["fields"])
+
+
+def test_the_field_list_is_fetched_once_and_reused_across_polls():
+    """get_fields is not re-run every poll: the topic's schema does not move."""
+    first = flatten(make_record(source="S1"), when="2026-08-14T02:00:00Z")
+    second = flatten(make_record(source="S2"), when="2026-08-14T04:00:00Z")
+    client = FakeEfdClient([frame_of([first]), frame_of([second])])
+    source = EfdTooAlertSource(poll_interval_s=0.0, once=True, client=client)
+
+    assert len(list(source)) == 1
+    assert len(list(source)) == 1, "the second poll delivers the second alert"
+    assert len(client.calls) == 2, "two polls happened"
+    assert client.field_calls == [EFD_TOPIC], "but the field list was fetched only once"
+
+
+def test_a_topic_with_no_fields_yet_is_skipped_then_recovers(caplog):
+    """An empty topic must not latch the source to 'nothing'.
+
+    ``get_fields`` returns nothing until an alert has been written. That empty
+    result is not cached, so once one appears the source picks it up rather than
+    forever asking for no fields -- and while it is empty, no fieldless query is
+    ever sent.
+    """
+    record = make_record()
+    real_fields = [str(c) for c in flatten(record).index]
+    client = FakeEfdClient([pd.DataFrame(), frame_of([flatten(record)])], fields=real_fields)
+
+    calls = {"n": 0}
+
+    async def fields_later(topic):
+        # Empty until an alert has been written, then the real schema.
+        calls["n"] += 1
+        return [] if calls["n"] == 1 else list(real_fields)
+
+    client.get_fields = fields_later
+    source = EfdTooAlertSource(poll_interval_s=0.0, client=client)
+
+    with caplog.at_level("WARNING"):
+        delivered = next(iter(source))
+
+    assert "no fields yet" in caplog.text
+    assert delivered[0]["source"] == record["source"]
+    assert calls["n"] >= 2, "the empty result is retried, not cached"
 
 
 def test_delivered_records_carry_their_provenance():
@@ -242,20 +376,32 @@ def test_the_site_is_named_before_anything_is_polled(caplog):
 
 
 def test_the_site_is_taken_from_the_client_not_the_config():
-    """An empty efd_name lets the host pick, and only the client then knows.
+    """A client that names itself is what is actually being read.
 
-    ``lsst.summit.utils`` resolves a default instance per host, so reporting
-    the configured string would say "unknown" on exactly the deployment where
-    the answer matters most.
+    ``efd_name`` is required to *build* a client, but a client handed in for
+    testing carries its own instance name, and that -- not the configured
+    string -- is what the source then reports.
     """
     client = FakeEfdClient([pd.DataFrame()])
     client.efd_name = "summit_efd"
     source = EfdTooAlertSource(efd_name="", poll_interval_s=0.0, once=True, client=client)
 
-    assert source.site == "unknown (the host default)", "nothing is known before connecting"
+    assert source.site == "unset", "nothing is known before connecting"
     list(source)
     assert source.site == "summit_efd"
     assert source.describe() == f"{EFD_TOPIC} on summit_efd (database {EFD_DATABASE})"
+
+
+def test_an_empty_efd_name_is_an_error_without_a_client():
+    """The host-default fallback is gone: a named instance is required.
+
+    With no client handed in, the source builds its own with
+    ``EfdClient(efd_name, db_name=...)``; an empty name has nothing to open, so
+    it is rejected before anything is polled rather than silently defaulted.
+    """
+    source = EfdTooAlertSource(efd_name="", poll_interval_s=0.0, once=True)
+    with pytest.raises(ValueError, match="must name an EFD instance"):
+        next(iter(source))
 
 
 def test_an_anonymous_client_reports_what_was_configured():
@@ -397,7 +543,52 @@ def test_lookback_reaches_before_startup():
     assert Config().ingest.efd_lookback_s == 0.0
 
     client = FakeEfdClient([pd.DataFrame()])
-    source = EfdTooAlertSource(poll_interval_s=0.0, once=True, lookback_s=600.0, client=client)
+    # revisit_s isolated to 0 here so the span measures the lookback alone.
+    source = EfdTooAlertSource(
+        poll_interval_s=0.0, once=True, lookback_s=600.0, revisit_s=0.0, client=client
+    )
     list(source)
     start, end = client.calls[0]["start"], client.calls[0]["end"]
     assert (end - start).sec == pytest.approx(600.0, abs=5.0)
+
+
+def test_every_poll_re_reads_a_trailing_window_for_late_alerts():
+    """The window reaches back lookback + revisit, not just to the watermark.
+
+    An alert's EFD time index is the producer's send time, but the relay makes
+    it queryable later. A plain forward-marching window sweeps past the
+    timestamp before the row appears; re-reading a trailing ``revisit_s`` behind
+    the watermark is what keeps a late alert from being lost.
+    """
+    client = FakeEfdClient([pd.DataFrame()])
+    source = EfdTooAlertSource(
+        poll_interval_s=0.0, once=True, lookback_s=30.0, revisit_s=900.0, client=client
+    )
+    list(source)
+    start, end = client.calls[0]["start"], client.calls[0]["end"]
+    assert (end - start).sec == pytest.approx(930.0, abs=5.0), "lookback + revisit"
+
+
+def test_a_late_arriving_row_is_caught_and_delivered_once():
+    """The fix, end to end: a row visible only on a later poll is still posted.
+
+    ``TimeAwareFakeEfdClient`` honours the query window and models the relay lag
+    by hiding the row until the second poll and stamping it a few seconds in the
+    past. With a plain ``[watermark, now]`` window the marching watermark would
+    have moved past that timestamp and the row would be lost; the trailing
+    revisit re-read catches it, and the dedup posts it exactly once.
+    """
+    when = pd.Timestamp.now(tz="UTC") - pd.Timedelta(seconds=5)
+    row = flatten(make_record(source="LATE"), when=when)
+    client = TimeAwareFakeEfdClient([(row, 1)])  # visible from the 2nd poll on
+    source = EfdTooAlertSource(
+        poll_interval_s=0.0, lookback_s=0.0, revisit_s=300.0, client=client
+    )
+
+    delivered = []
+    for item in source:
+        delivered.append(item)
+        break
+    assert len(delivered) == 1
+    assert delivered[0][0]["source"] == "LATE"
+    assert len(client.calls) >= 2, "it took a re-read on a later poll to see it"

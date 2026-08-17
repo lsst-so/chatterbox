@@ -224,6 +224,60 @@ def test_serve_exits_non_zero_instead_of_tracebacking(config, tmp_path, monkeypa
     assert cli.main(["-c", str(config_path), "serve"]) == 1
 
 
+def test_serve_lookback_and_since_resolve_to_seconds():
+    """`--since`/`--lookback` become the EFD first-poll lookback; None keeps the
+    configured value. This is the knob that catches an already-injected alert."""
+    from chatterbox import cli
+
+    parser = cli.build_parser()
+
+    assert cli._serve_lookback(parser.parse_args(["serve", "--lookback", "600"])) == 600.0
+    # A past --since is a positive reach-back; the exact value tracks "now", so
+    # only its sign and rough scale are asserted.
+    since = cli._serve_lookback(parser.parse_args(["serve", "--since", "2000-01-01T00:00:00"]))
+    assert since > 0
+    assert cli._serve_lookback(parser.parse_args(["serve"])) is None
+
+
+def test_serve_rejects_bad_lookback_options():
+    from chatterbox import cli
+
+    parser = cli.build_parser()
+
+    with pytest.raises(ValueError, match="only one of"):
+        cli._serve_lookback(parser.parse_args(["serve", "--since", "2000-01-01T00:00:00", "--lookback", "5"]))
+    with pytest.raises(ValueError, match="future"):
+        cli._serve_lookback(parser.parse_args(["serve", "--since", "2999-01-01T00:00:00"]))
+    with pytest.raises(ValueError, match="negative"):
+        cli._serve_lookback(parser.parse_args(["serve", "--lookback", "-5"]))
+
+
+def test_serve_hands_the_lookback_override_to_run_service(tmp_path, monkeypatch):
+    """A bad option must exit before the override ever reaches run_service."""
+    from chatterbox import app, cli
+
+    captured = {}
+
+    def capture(config, run_sim=True, lookback_s=None, **kwargs):
+        captured["lookback_s"] = lookback_s
+        return 0
+
+    monkeypatch.setattr(app, "run_service", capture)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"paths: {{work_dir: {tmp_path / 'work'}}}\n")
+
+    assert cli.main(["-c", str(config_path), "serve", "--lookback", "1800"]) == 0
+    assert captured["lookback_s"] == 1800.0
+
+    assert cli.main(["-c", str(config_path), "serve"]) == 0
+    assert captured["lookback_s"] is None
+
+    # A future --since is caught in the CLI and never reaches run_service.
+    captured.clear()
+    assert cli.main(["-c", str(config_path), "serve", "--since", "2999-01-01T00:00:00"]) == 2
+    assert captured == {}
+
+
 def test_sim_job_spec_is_self_describing(record, config, tmp_path):
     """The job directory is the contract between the bot and the sim driver."""
     from chatterbox.ingest.decode import decode_record

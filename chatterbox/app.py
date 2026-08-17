@@ -475,7 +475,9 @@ def _start_simulation(
         report.sim_thread = thread
 
 
-def run_service(config: Config, paths=None, run_sim: bool = True) -> int:
+def run_service(
+    config: Config, paths=None, run_sim: bool = True, lookback_s: float | None = None
+) -> int:
     """Consume the configured source and post about every record.
 
     Parameters
@@ -486,6 +488,9 @@ def run_service(config: Config, paths=None, run_sim: bool = True) -> int:
         Explicit record paths, forcing replay mode.
     run_sim : `bool`
         Launch simulations.
+    lookback_s : `float`, optional
+        Override for the EFD first-poll lookback (from ``serve
+        --since/--lookback``). `None` keeps ``ingest.efd_lookback_s``.
 
     Returns
     -------
@@ -494,7 +499,7 @@ def run_service(config: Config, paths=None, run_sim: bool = True) -> int:
     """
     from .ingest.source import make_source
 
-    source = make_source(config, paths=paths)
+    source = make_source(config, paths=paths, lookback_s=lookback_s)
     poster = SlackPoster(config)
     handled = 0
     pending: list[TriggerReport] = []

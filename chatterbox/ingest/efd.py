@@ -199,8 +199,9 @@ class EfdTooAlertSource(TooAlertSource):
     Parameters
     ----------
     efd_name : `str`
-        EFD instance to connect to: ``summit_efd``, ``usdf_efd``, ``idf_efd``
-        or ``base_efd``. Empty uses the client's own default for the host.
+        EFD instance to connect to: ``summit_efd``, ``base_efd``, ``usdf_efd``
+        or ``idf_efd``. Required: the client is opened directly as
+        ``EfdClient(efd_name, db_name=...)`` with no host-default fallback.
     database : `str`
         InfluxDB database holding the alerts. The default, `EFD_DATABASE`, is
         not where the SAL topics live, so it has to be set explicitly on the
@@ -214,6 +215,15 @@ class EfdTooAlertSource(TooAlertSource):
         alerts that arrive from now on", which is the safe default: chatterbox
         keeps no record of what it has already posted, so a longer lookback
         makes a restart re-post recent alerts.
+    revisit_s : `float`
+        How far *behind* the watermark each poll re-reads, to catch alerts that
+        become queryable later than their own timestamp. A record's InfluxDB
+        time index is the producer's send time, but it does not appear in query
+        results until the SCiMMA->EFD relay has written it, which can lag by far
+        more than one poll. Without this, the marching window sweeps past the
+        timestamp before the row is visible and the alert is missed forever; the
+        `_seen` dedup makes the re-read free of double-posts. Must exceed the
+        real ingest lag; ``0`` restores the old sweep-once behaviour.
     once : `bool`
         Query once and return, for tests and cron-style deployments.
     max_consecutive_errors : `int`
@@ -238,6 +248,7 @@ class EfdTooAlertSource(TooAlertSource):
         topic: str = EFD_TOPIC,
         poll_interval_s: float = 10.0,
         lookback_s: float = 0.0,
+        revisit_s: float = 900.0,
         once: bool = False,
         max_consecutive_errors: int = 5,
         client: Any = None,
@@ -247,11 +258,19 @@ class EfdTooAlertSource(TooAlertSource):
         self.topic = topic
         self.poll_interval_s = poll_interval_s
         self.lookback_s = lookback_s
+        self.revisit_s = revisit_s
         self.once = once
         self.max_consecutive_errors = max_consecutive_errors
         self._client = client
         self._owns_client = client is None
         self._prepared = False
+        #: Field names the query asks for, fetched once from the topic and
+        #: reused. Naming them is what makes the query return anything at all
+        #: (see `_fields`), so this is not an optimisation to skip. Cached only
+        #: once non-empty, so a topic with no data yet is retried rather than
+        #: latched to "nothing".
+        self._field_names: list[str] = []
+        self._warned_no_fields = False
         #: Instance the client actually resolved to, which is the only way to
         #: know which site an empty ``efd_name`` picked. Filled on connect.
         self._resolved_site: str | None = None
@@ -270,16 +289,16 @@ class EfdTooAlertSource(TooAlertSource):
     def site(self) -> str:
         """Which EFD instance this source reads.
 
-        Resolved from the client once it is open, because ``efd_name`` may be
-        empty -- ``lsst.summit.utils`` then picks an instance for the host, and
-        the configuration alone cannot say which. Before connecting, and for a
-        client that does not name itself, this falls back to what was asked
-        for, and says so rather than inventing a site.
+        Prefers the instance the client resolved to once it is open, since a
+        client can name itself and that is what is actually being read. Before
+        connecting it falls back to the configured ``efd_name``; a source built
+        without one -- only a client handed in via ``client=`` for testing --
+        has nothing to report yet and says so rather than inventing a site.
         """
         if self._resolved_site:
             return self._resolved_site
         configured = (self.efd_name or "").strip()
-        return configured or "unknown (the host default)"
+        return configured or "unset"
 
     def describe(self) -> str:
         """One line naming the site, database and topic being polled.
@@ -314,57 +333,39 @@ class EfdTooAlertSource(TooAlertSource):
         logger.debug("EFD client does not name its instance; reporting the configured name")
 
     def _build_client(self) -> Any:
-        """Construct an EFD client, preferring the summit helper.
+        """Construct an EFD client for the named instance.
 
-        An explicit `efd_name` is a request for exactly that instance, so it is
-        built directly with `lsst_efd_client.EfdClient` rather than through
-        `makeEfdClient`: that helper's only way to pick an instance is to
-        auto-detect the host's own site (or, given any truthy first argument,
-        return a hardcoded ``testing`` instance) -- it has no parameter that
-        means "open this specific named instance", so passing `efd_name`
-        through it is silently ignored rather than honoured. `makeEfdClient` is
-        used only for the auto-detecting case, an empty `efd_name`.
+        Built directly with `lsst_efd_client.EfdClient`, exactly as the
+        summit analysis notebooks open it, i.e.
+        ``EfdClient(efd_name, db_name="lsst.scimma")``. A named instance
+        is required; there is no host-autodetecting fallback. The one
+        helper that offered it -- `lsst.summit.utils`'s ``makeEfdClient``
+        -- has no parameter meaning "open this named instance": it only
+        resolves the running host's own site (and, given any truthy
+        first argument, returns a hardcoded ``testing`` instance), so it
+        could never honour `efd_name` in the first place.
 
-        `db_name` is passed at construction time in both cases. Setting it as
-        a plain attribute afterward -- which is what a client handed in via
-        `client=` still needs, since a test double has no constructor to steer
-        -- has no effect on a real `EfdClient`: it only reads its private
-        `_db_name`, so a client built without the right `db_name` silently
-        queries the default database and never finds the alert topic.
+        `db_name` is passed at construction time. A real `EfdClient` reads only
+        its private ``_db_name``, so setting the attribute afterward has no
+        effect: a client built without the right `db_name` silently queries the
+        default database (the SAL topics) and never finds the alert topic.
         """
         name = (self.efd_name or "").strip()
+        if not name:
+            raise ValueError(
+                "ingest.efd_name must name an EFD instance (summit_efd, base_efd, "
+                "usdf_efd or idf_efd); set the top-level 'site', which fills it in, "
+                "or ingest.efd_name directly. There is no host-default fallback."
+            )
         try:
             from lsst_efd_client import EfdClient
-        except ImportError:
-            EfdClient = None  # noqa: N806
-
-        if name:
-            if EfdClient is None:
-                raise ImportError(
-                    "EFD ingest requires lsst-efd-client (pip install lsst-efd-client) "
-                    "to open a named EFD instance"
-                )
-            client = EfdClient(name, db_name=self.database)
-            self._note_site(client)
-            logger.info("Opened the %s EFD via lsst_efd_client (ingest.efd_name=%r)", self.site, name)
-            return client
-
-        try:
-            from lsst.summit.utils.efdUtils import makeEfdClient
         except ImportError as exc:
-            if EfdClient is None:
-                raise ImportError(
-                    "EFD ingest requires lsst-efd-client (pip install lsst-efd-client), "
-                    "or lsst.summit.utils on an RSP host"
-                ) from exc
-            raise ValueError(
-                "ingest.efd_name must name an EFD instance (summit_efd, usdf_efd, "
-                "idf_efd, base_efd) when lsst.summit.utils is not available to pick "
-                "a default for this host"
+            raise ImportError(
+                "EFD ingest requires lsst-efd-client (pip install lsst-efd-client)"
             ) from exc
-        client = makeEfdClient(databaseName=self.database)
+        client = EfdClient(name, db_name=self.database)
         self._note_site(client)
-        logger.info("Opened the %s EFD via lsst.summit.utils (host default)", self.site)
+        logger.info("Opened the %s EFD via lsst_efd_client (db_name=%r)", self.site, self.database)
         return client
 
     def _ensure_client(self) -> Any:
@@ -391,13 +392,66 @@ class EfdTooAlertSource(TooAlertSource):
             self._prepared = True
         return self._client
 
-    def _query(self, start: Time, end: Time) -> pd.DataFrame:
-        """One ``select_time_series`` call, run on the private loop."""
+    def _fields(self) -> list[str]:
+        """The field names to select, fetched once from the topic.
+
+        Matches the summit analysis notebooks, which call ``get_fields`` and
+        hand the result straight to ``select_time_series``. At nside 32 that is
+        ~12,300 names (12,288 reward-map pixels plus the scalars), and the
+        client is content to take the whole list -- the notebooks query it that
+        way.
+
+        Naming the fields is not an optimisation, it is what makes the query
+        return anything at all. A quoted ``"*"`` is *not* an InfluxQL wildcard:
+        the client quotes every field it is handed, so ``"*"`` becomes
+        ``SELECT "*"``, a request for a field literally named ``*`` that no
+        measurement has. The old query therefore matched nothing -- every poll
+        came back empty, no alert was ever seen, and nothing was posted to
+        Slack. The unquoted wildcard is unreachable through this client, so the
+        fields are listed out instead.
+
+        Cached once non-empty. An empty result means the topic has no data yet
+        (``SHOW FIELD KEYS`` ignores the time window, so any alert ever written
+        fills it in), so it is not cached: the next poll asks again rather than
+        latching to "nothing" forever.
+        """
+        if self._field_names:
+            return self._field_names
         client = self._ensure_client()
         assert self._loop is not None
-        # "*" rather than a field list: at nside 32 the explicit list is over
-        # 12,000 names long, and the client would only expand it again.
-        frame = self._loop.run_until_complete(client.select_time_series(self.topic, "*", start, end))
+        fields = self._loop.run_until_complete(client.get_fields(self.topic))
+        names = [str(f) for f in fields] if fields else []
+        if names:
+            self._field_names = names
+            self._warned_no_fields = False
+            logger.info("EFD topic %s exposes %d fields", self.topic, len(names))
+        elif not self._warned_no_fields:
+            # Once, not every poll: an empty topic is a real but quiet state,
+            # and 10-second repetition would bury everything else.
+            self._warned_no_fields = True
+            logger.warning(
+                "EFD topic %s reports no fields yet -- it holds no data to query. "
+                "Waiting for an alert to be written; retrying each poll.",
+                self.topic,
+            )
+        return names
+
+    def _query(self, start: Time, end: Time) -> pd.DataFrame:
+        """One ``select_time_series`` call, run on the private loop.
+
+        The fields are listed explicitly (see `_fields`), exactly as the summit
+        notebooks issue the query. With no fields to name -- an empty topic --
+        there is nothing to ask for, so the poll is skipped rather than sending
+        a fieldless query the client would reject.
+        """
+        client = self._ensure_client()
+        assert self._loop is not None
+        fields = self._fields()
+        if not fields:
+            return pd.DataFrame()
+        frame = self._loop.run_until_complete(
+            client.select_time_series(self.topic, fields, start, end)
+        )
         if frame is None:
             return pd.DataFrame()
         return frame
@@ -447,8 +501,15 @@ class EfdTooAlertSource(TooAlertSource):
         errors = 0
         while True:
             end = Time.now()
+            # Re-read a trailing window behind the watermark, not just [watermark,
+            # end]: an alert's time index is its producer send time, but the relay
+            # makes it queryable later, so a plain marching window sweeps past the
+            # timestamp before the row appears and loses it. Overlapping every
+            # poll by ``revisit_s`` gives late rows that many seconds to surface;
+            # `_new_rows` dedups the re-read so nothing is posted twice.
+            start = self._watermark - TimeDelta(self.revisit_s, format="sec")
             try:
-                frame = self._query(self._watermark, end)
+                frame = self._query(start, end)
                 errors = 0
             except Exception as exc:
                 errors += 1

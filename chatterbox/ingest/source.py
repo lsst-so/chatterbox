@@ -228,7 +228,7 @@ def _unwrap(message: Any) -> list[dict[str, Any]]:
     return []
 
 
-def make_source(config: Config, paths=None) -> TooAlertSource:
+def make_source(config: Config, paths=None, lookback_s: float | None = None) -> TooAlertSource:
     """Build the ingest source described by the configuration.
 
     Parameters
@@ -238,6 +238,11 @@ def make_source(config: Config, paths=None) -> TooAlertSource:
     paths : sequence, optional
         Explicit record paths. Forces a `ReplaySource` regardless of
         ``ingest.kind``.
+    lookback_s : `float`, optional
+        Override for how far before startup the first EFD poll reaches, from
+        ``serve --since/--lookback``. `None` keeps the configured
+        ``ingest.efd_lookback_s``. EFD-only: no other source has a lookback, so
+        a value passed with another ``kind`` is ignored.
 
     Returns
     -------
@@ -257,7 +262,8 @@ def make_source(config: Config, paths=None) -> TooAlertSource:
             database=ingest.efd_database,
             topic=ingest.efd_topic,
             poll_interval_s=ingest.efd_poll_interval_s,
-            lookback_s=ingest.efd_lookback_s,
+            lookback_s=ingest.efd_lookback_s if lookback_s is None else lookback_s,
+            revisit_s=ingest.efd_revisit_s,
             max_consecutive_errors=ingest.efd_max_consecutive_errors,
         )
     if kind == "kafka":

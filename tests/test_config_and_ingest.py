@@ -302,12 +302,33 @@ def test_efd_settings_reach_the_source():
     config.ingest.efd_topic = "lsst.scimma.too_alert_test"
     config.ingest.efd_poll_interval_s = 42.0
     config.ingest.efd_lookback_s = 300.0
+    config.ingest.efd_revisit_s = 600.0
     source = make_source(config)
     assert isinstance(source, EfdTooAlertSource)
     assert source.efd_name == "usdf_efd"
     assert source.topic == "lsst.scimma.too_alert_test"
     assert source.poll_interval_s == 42.0
     assert source.lookback_s == 300.0
+    assert source.revisit_s == 600.0, "the late-alert re-read window reaches the source"
+
+
+def test_a_lookback_override_reaches_the_efd_source():
+    """`serve --since/--lookback` must beat the configured lookback.
+
+    With ingest.efd_lookback_s at its safe 0.0 default, serve only sees alerts
+    that arrive after it starts; an alert injected just before is missed. The
+    override is how an operator reaches back to catch it.
+    """
+    from chatterbox.ingest.efd import EfdTooAlertSource
+
+    config = Config()
+    assert config.ingest.efd_lookback_s == 0.0
+    source = make_source(config, lookback_s=3600.0)
+    assert isinstance(source, EfdTooAlertSource)
+    assert source.lookback_s == 3600.0, "the override wins over the configured value"
+
+    # None leaves the configured value untouched.
+    assert make_source(config).lookback_s == 0.0
 
 
 def test_make_source_selects_by_kind(tmp_path):

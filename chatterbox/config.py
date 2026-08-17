@@ -137,9 +137,9 @@ class IngestConfig:
     #: Seconds between directory scans.
     poll_interval_s: float = 2.0
 
-    #: EFD instance: ``summit_efd``, ``usdf_efd``, ``idf_efd``, ``base_efd``.
-    #: Empty lets an RSP host choose its own default, which only works where
-    #: ``lsst.summit.utils`` is installed.
+    #: EFD instance: ``summit_efd``, ``base_efd``, ``usdf_efd``, ``idf_efd``.
+    #: Required for the EFD source: the client is opened directly as
+    #: ``EfdClient(efd_name, db_name=...)`` with no host-default fallback.
     efd_name: str = "summit_efd"
     #: InfluxDB database the alerts are written to. Deliberately not the
     #: default database, which holds the SAL topics.
@@ -153,6 +153,13 @@ class IngestConfig:
     #: alerts": chatterbox does not remember what it has posted, so a lookback
     #: makes a restart re-post anything inside it.
     efd_lookback_s: float = 0.0
+    #: How far behind the watermark every poll re-reads, to catch alerts the
+    #: relay makes queryable later than their own timestamp. A record's time
+    #: index is the producer's send time, but it can appear in the EFD minutes
+    #: after; without this margin the marching window sweeps past it and the
+    #: alert is silently lost. Must exceed the real ingest lag. The dedup makes
+    #: the re-read free of double-posts.
+    efd_revisit_s: float = 900.0
     #: Consecutive failed queries tolerated before the service gives up and
     #: reports it. One failure is a blip; five in a row is an outage.
     efd_max_consecutive_errors: int = 5
