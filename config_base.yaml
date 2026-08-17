@@ -131,6 +131,12 @@ sim:
   ts_fbs_utils: /home/smacbride/ts_fbs_utils
   # Must be the tree containing sim_baseline.
   rubin_sim_data: /project/scheduler
+  # Pre-computed sky brightness, exported as SIMS_SKYBRIGHTNESS_DATA. Empty uses
+  # <rubin_sim_data>/skybrightness_pre, which here holds a single month-long
+  # file (MJD 60979-61011, i.e. Oct-Dec 2025) -- so every simulation of a
+  # current night dies in SkyModelPre with "MJD is out of range for the files
+  # found". The multi-year set is staged alongside it and covers 2021-2036.
+  skybrightness_data: /project/scheduler/skybrightness_pre_full
   # The visit history the simulation starts from. It is fetched from ConsDB
   # with lsst_survey_sim's own fetch_previous_visits and cached here, so there
   # is nothing to stage by hand. It refreshes when the cache is older than

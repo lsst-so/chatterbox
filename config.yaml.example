@@ -136,7 +136,14 @@ sim:
   # snapshot is used, which can drift from what the scheduler runs.
   ts_fbs_utils: ~/Rubin-Observatory/ts_fbs_utils
   # Must be the tree containing sim_baseline.
-  rubin_sim_data: /sdf/group/rubin/shared/rubin_sim_data/ 
+  rubin_sim_data: /sdf/group/rubin/shared/rubin_sim_data/
+  # Pre-computed sky brightness, exported as SIMS_SKYBRIGHTNESS_DATA. Empty uses
+  # <rubin_sim_data>/skybrightness_pre, which on some site trees holds only a
+  # single month-long file -- enough for a recent night, not enough to simulate
+  # a follow-up starting tonight, which fails with "MJD is out of range for the
+  # files found". Point this at the multi-year set when one is staged, usually
+  # <rubin_sim_data>/skybrightness_pre_full.
+  skybrightness_data: ""
   # The visit history the simulation starts from. It is fetched from ConsDB
   # with lsst_survey_sim's own fetch_previous_visits and cached here, so there
   # is nothing to stage by hand. It refreshes when the cache is older than

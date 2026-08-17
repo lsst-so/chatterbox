@@ -241,6 +241,16 @@ class SimConfig:
     ts_fbs_utils: str = ""
     #: Must be the tree containing ``sim_baseline``.
     rubin_sim_data: str = "~/RubinUtils/rubin_sim_data"
+    #: Pre-computed sky brightness files, exported as
+    #: ``SIMS_SKYBRIGHTNESS_DATA``. Empty uses
+    #: ``<rubin_sim_data>/skybrightness_pre``, which is where
+    #: ``scheduler_download_data`` puts a *single* month-long file -- enough to
+    #: run the scheduler on a recent night, and not enough to simulate a ToO
+    #: follow-up starting tonight. The multi-year set lives alongside it as
+    #: ``skybrightness_pre_full`` on a site data tree; point this there.
+    #: ``SkyModelPre`` raises "MJD is out of range for the files found" when
+    #: the night being simulated falls outside whatever is here.
+    skybrightness_data: str = ""
 
     #: Cached visit history the simulation starts from. It is fetched from
     #: ConsDB with ``lsst_survey_sim.fetch_previous_visits`` and refreshed
@@ -522,6 +532,27 @@ def apply_environment(config: Config) -> None:
         from .alerts.classes import _live_strategies
 
         _live_strategies.cache_clear()
+
+    # Independent of RUBIN_SIM_DATA_DIR, and set before it: SkyModelPre reads
+    # this variable in preference to <data_dir>/skybrightness_pre, so it is how
+    # a tree whose bundled sky brightness covers one month is pointed at the
+    # multi-year set without disturbing anything else it holds.
+    skybrightness = (config.sim.skybrightness_data or "").strip()
+    if skybrightness:
+        sky_path = Path(skybrightness).expanduser()
+        os.environ["SIMS_SKYBRIGHTNESS_DATA"] = str(sky_path)
+        if not sky_path.is_dir():
+            logger.error(
+                "sim.skybrightness_data=%s does not exist; every simulation will fail "
+                "in SkyModelPre. Point it at a directory of pre-computed .h5 files.",
+                sky_path,
+            )
+        elif not any(sky_path.glob("*.h5")):
+            logger.error(
+                "sim.skybrightness_data=%s holds no .h5 files; every simulation will "
+                "fail in SkyModelPre.",
+                sky_path,
+            )
 
     configured = (config.sim.rubin_sim_data or "").strip()
     if not configured:

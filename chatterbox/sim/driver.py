@@ -178,7 +178,16 @@ def run_job(job_dir: Path) -> dict[str, Any]:
     from astropy.time import Time
     from rubin_scheduler.scheduler.utils import SimTargetooServer, TargetoO
 
-    sys.path.insert(0, str(Path(sim_cfg["lsst_survey_sim"]).expanduser()))
+    from ..deps import import_root
+
+    # import_root() rather than a bare Path: an empty sim.lsst_survey_sim means
+    # "use the installed package", and Path("") is Path("."), which would put
+    # the working directory on sys.path instead of nothing. A checkout that is
+    # on the path shadows the installed copy, so a stale one is a wrong-API
+    # TypeError inside the driver rather than an ImportError anywhere obvious.
+    survey_sim_root = import_root(sim_cfg.get("lsst_survey_sim"))
+    if survey_sim_root is not None:
+        sys.path.insert(0, str(survey_sim_root))
     from lsst_survey_sim import lsst_support, simulate_lsst
 
     from ..astro.skymap import localization_from_probability, localization_from_reward_map

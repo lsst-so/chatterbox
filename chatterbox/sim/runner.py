@@ -337,6 +337,11 @@ def launch_simulation(
 
     env = dict(os.environ)
     env["RUBIN_SIM_DATA_DIR"] = str(Path(config.sim.rubin_sim_data).expanduser())
+    # Set explicitly rather than relying on apply_environment having run in
+    # this process: without it the driver falls back to the one month of sky
+    # brightness that ships under the data tree and dies in SkyModelPre.
+    if (config.sim.skybrightness_data or "").strip():
+        env["SIMS_SKYBRIGHTNESS_DATA"] = str(Path(config.sim.skybrightness_data).expanduser())
     # The driver needs chatterbox itself plus lsst_survey_sim, which is used
     # from a checkout rather than being pip-installed.
     repo_root = str(Path(__file__).resolve().parents[2])
