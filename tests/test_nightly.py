@@ -390,6 +390,29 @@ def sim_result(**overrides):
         nights_with_overlap=20,
         overlap_visits=2356,
         overlap_too_visits=1804,
+        coverage_combined={"g": 0.36, "i": 0.44},
+        any_band_combined=0.48,
+        survey_gain={"g": 0.03, "i": 0.05, "any": 0.07},
+        survey_visits_on_localization=552,
+        localization_visits=2356,
+        campaign_time={
+            "too_seconds": 2280.0,
+            "too_open_shutter_s": 1710.0,
+            "all_seconds": 30840.0,
+            "fraction": 0.074,
+            "n_too_visits": 57,
+            "n_all_visits": 771,
+            "nights": 3,
+            "span_hours": 49.2,
+            "by_night": {
+                "0": {"too_s": 1200.0, "all_s": 10280.0, "n_too": 30, "fraction": 0.117},
+                "1": {"too_s": 800.0, "all_s": 10280.0, "n_too": 20, "fraction": 0.078},
+                "2": {"too_s": 280.0, "all_s": 10280.0, "n_too": 7, "fraction": 0.027},
+            },
+            "by_band": {"g": 1200.0, "i": 1080.0},
+            "by_epoch": {"0": 1200.0, "1": 1080.0},
+            "measure": "visittime + slewtime",
+        },
     )
     defaults.update(overrides)
     return SimResult(**defaults)
@@ -940,3 +963,117 @@ def test_post_sim_routes_a_test_alert(config, tmp_path):
     assert read_job_spec(job_dir)["is_test"] is True
     # And a job directory from before that field existed still posts.
     assert read_job_spec(tmp_path / "nonexistent") == {}
+
+
+# ------------------------------------------- ToO versus survey, and the cost
+
+
+def test_the_reply_labels_both_coverage_numbers(config):
+    """Issue #2: one unlabelled row cannot say which reading it is."""
+    from chatterbox.slackbot.blocks import build_sim_reply_blocks
+
+    text = render_blocks_as_text(build_sim_reply_blocks(sim_result(), config))
+    assert "ToO follow-up only" in text
+    assert "+ nominal survey" in text
+    # Both any-band totals, and the difference stated rather than left to be
+    # worked out from two rows of percentages.
+    assert "41.0%" in text and "48.0%" in text
+    assert "+7.0 points" in text
+    assert "552 non-ToO visits" in text
+
+
+def test_the_reply_explains_why_the_two_do_not_sum(config):
+    """A reader who adds them gets a number that means nothing."""
+    from chatterbox.slackbot.blocks import build_sim_reply_blocks
+
+    text = render_blocks_as_text(build_sim_reply_blocks(sim_result(), config))
+    assert "re-covers what the follow-up already reached" in text
+
+
+def test_an_older_result_still_reports_the_too_numbers(config):
+    """result.json from before the comparison existed must not show zeros."""
+    from chatterbox.slackbot.blocks import build_sim_reply_blocks
+
+    result = sim_result(coverage_combined={}, any_band_combined=0.0, survey_gain={}, campaign_time={})
+    assert result.has_combined_coverage() is False
+    text = render_blocks_as_text(build_sim_reply_blocks(result, config))
+    assert "ToO follow-up only" in text
+    assert "+ nominal survey" not in text
+    assert "Campaign cost" not in text
+
+
+def test_the_reply_reports_what_the_campaign_cost(config):
+    """The second half of issue #2: time spent, not just coverage bought."""
+    from chatterbox.slackbot.blocks import build_sim_reply_blocks
+
+    text = render_blocks_as_text(build_sim_reply_blocks(sim_result(), config))
+    assert "Campaign cost" in text
+    assert "38 min" in text, "2280 s of follow-up"
+    assert "over 3 nights" in text
+    assert "7.4%" in text
+    assert "spanned 49.2 h" in text
+    # And per night, alongside the coverage progression it should be read with.
+    assert "n+0 20 min (12%)" in text
+    assert "n+2 5 min (3%)" in text
+
+
+def test_a_time_floor_is_declared_as_one(config):
+    """An exposure-only total must not read as a cheap campaign."""
+    from chatterbox.slackbot.blocks import build_sim_reply_blocks
+
+    result = sim_result()
+    result.campaign_time = dict(result.campaign_time)
+    result.campaign_time["measure"] = "exptime (no visittime or slewtime column)"
+    text = render_blocks_as_text(build_sim_reply_blocks(result, config))
+    assert "this is a floor" in text
+
+
+def test_the_figure_message_describes_the_time_panel(config):
+    text = render_blocks_as_text(build_sim_figures_blocks(sim_result(), config))
+    assert "lower panel is the observing time" in text
+    assert "dashed once the" in text, "the second curve needs explaining too"
+
+
+def test_the_per_night_figure_can_carry_the_campaign_time(tmp_path):
+    """The coverage and its cost on one figure, sharing a night axis."""
+    from chatterbox.plots.nightly_coverage import plot_coverage_by_night
+    from chatterbox.sim.coverage import CampaignTime, coverage_by_night
+
+    localization = disc_localization(radius=4.0, graded=True)
+    visits = pd.concat(
+        [visit_rows([(59.0 + 0.5 * n, -35.0)], band="g", night=n) for n in (11, 12, 13)],
+        ignore_index=True,
+    )
+    nightly = coverage_by_night(visits, localization, reference_night=11)
+    timing = CampaignTime(
+        too_seconds=1800.0,
+        all_seconds=18000.0,
+        fraction=0.1,
+        nights=3,
+        by_night={
+            "0": {"too_s": 1200.0, "all_s": 9000.0, "n_too": 30, "fraction": 0.133},
+            "1": {"too_s": 480.0, "all_s": 9000.0, "n_too": 12, "fraction": 0.053},
+            "2": {"too_s": 120.0, "all_s": 9000.0, "n_too": 3, "fraction": 0.013},
+        },
+    )
+
+    with_time = plot_coverage_by_night(
+        nightly, localization, tmp_path / "with_time.png", source="S1", timing=timing
+    )
+    without = plot_coverage_by_night(nightly, localization, tmp_path / "without.png", source="S1")
+    assert with_time is not None and without is not None
+    assert with_time.stat().st_size > without.stat().st_size, "the panel has to be visible"
+
+
+def test_a_run_with_no_timing_renders_unchanged(tmp_path):
+    """An empty CampaignTime must not draw an empty panel."""
+    from chatterbox.plots.nightly_coverage import plot_coverage_by_night
+    from chatterbox.sim.coverage import CampaignTime, coverage_by_night
+
+    localization = disc_localization(radius=4.0, graded=True)
+    visits = visit_rows([(60.0, -35.0)], band="g", night=11)
+    nightly = coverage_by_night(visits, localization, reference_night=11)
+    path = plot_coverage_by_night(
+        nightly, localization, tmp_path / "empty_timing.png", source="S1", timing=CampaignTime()
+    )
+    assert path is not None and path.is_file()

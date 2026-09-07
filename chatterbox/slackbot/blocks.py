@@ -404,6 +404,45 @@ def build_trigger_blocks(
     return blocks
 
 
+def _band_row(fractions: dict[str, float]) -> str:
+    """One row of per-band percentages, in canonical band order."""
+    bands = ("u", "g", "r", "i", "z", "y")
+    return "  ".join(f"{band} {100 * fractions.get(band, 0.0):.1f}%" for band in bands)
+
+
+def _any(fraction: float) -> str:
+    """The any-band total, formatted to close a band row."""
+    return f"  |  any band *{100 * fraction:.1f}%*"
+
+
+def _campaign_line(result: SimResult) -> str:
+    """What the follow-up cost the survey, or "" when it was not measured.
+
+    The other half of judging a strategy: coverage bought, against the
+    observing time it took from the nominal cadence on the same nights.
+    """
+    timing = result.campaign_time or {}
+    seconds = float(timing.get("too_seconds", 0.0))
+    if seconds <= 0:
+        return ""
+    nights = int(timing.get("nights", 0))
+    line = (
+        f":stopwatch: *Campaign cost* {seconds / 60.0:.0f} min of observing time "
+        f"over {nights} night{'s' if nights != 1 else ''}"
+    )
+    fraction = float(timing.get("fraction", 0.0))
+    if fraction > 0:
+        line += f", *{100 * fraction:.1f}%* of everything observed on those nights"
+    span = float(timing.get("span_hours", 0.0))
+    if span > 0:
+        line += f"; the follow-up spanned {span:.1f} h"
+    measure = str(timing.get("measure", ""))
+    if measure and "no visittime" in measure:
+        # Say so rather than let an undercount read as a cheap campaign.
+        line += f"\n_Time from `{measure}`: slew and readout are not included, so this is a floor._"
+    return line
+
+
 def build_sim_reply_blocks(result: SimResult, config: Config) -> list[dict[str, Any]]:
     """Build the threaded reply carrying simulation results.
 
@@ -428,18 +467,35 @@ def build_sim_reply_blocks(result: SimResult, config: Config) -> list[dict[str, 
         ]
 
     quantity = result.quantity
-    per_band = "  |  ".join(
-        f"{band} *{100 * result.coverage.get(band, 0.0):.1f}%*" for band in ("u", "g", "r", "i", "z", "y")
-    )
     lines = [
         f":telescope: *Simulated {result.nights}-night follow-up of {result.source}* "
         f"(`{result.alert_type}`)",
         f"Expected fraction of localization {quantity} covered, per band:",
-        per_band,
-        f"Any band: *{100 * result.any_band:.1f}%*",
-        f"{result.too_visits:,} ToO visits out of {result.total_visits:,} total; "
-        f"ran in {result.runtime_s / 60.0:.1f} min.",
     ]
+    # Two rows, labelled: the ToO strategy on its own, and what the
+    # localization actually receives once nominal-cadence visits landing on it
+    # are counted. Without the labels a single row invites both readings.
+    lines.append("*ToO follow-up only*  " + _band_row(result.coverage) + _any(result.any_band))
+    if result.has_combined_coverage():
+        gain = result.survey_gain.get("any", result.any_band_combined - result.any_band)
+        lines.append(
+            "*+ nominal survey*  "
+            + _band_row(result.coverage_combined)
+            + _any(result.any_band_combined)
+            + f"  ({100 * gain:+.1f} points from survey visits)"
+        )
+        lines.append(
+            f"_The survey re-covers what the follow-up already reached, so only that "
+            f"difference is new {quantity}; {result.survey_visits_on_localization:,} "
+            f"non-ToO visits touched the localization._"
+        )
+    lines.append(
+        f"{result.too_visits:,} ToO visits out of {result.total_visits:,} total; "
+        f"ran in {result.runtime_s / 60.0:.1f} min."
+    )
+    campaign = _campaign_line(result)
+    if campaign:
+        lines.append(campaign)
     if not result.is_probability_result():
         lines.append(
             ":warning: These are *area* fractions, not probabilities: no probability skymap was "
@@ -464,7 +520,11 @@ def build_sim_reply_blocks(result: SimResult, config: Config) -> list[dict[str, 
         heading = "*Per night* (cumulative, any band)"
         if result.trigger_night is not None:
             heading += ", counted from the trigger night"
-        blocks.append(_section(heading + "\n" + _night_progression(result)))
+        section = heading + "\n" + _night_progression(result)
+        time_line = _night_time_line(result)
+        if time_line:
+            section += "\n*Follow-up time per night*\n" + time_line
+        blocks.append(_section(section))
 
     notes = []
     if result.opsim:
@@ -505,6 +565,42 @@ def _night_progression(result: SimResult, max_nights: int = 12) -> str:
         # trigger night and "-1" a nominal-cadence pass before it.
         label = f"{int(night):+d}" if result.trigger_night is not None else str(night)
         parts.append(f"n{label} {100 * result.cumulative_by_night[night]:.0f}%")
+    if len(parts) > max_nights:
+        parts = parts[: max_nights - 1] + ["..."] + parts[-1:]
+    return " → ".join(parts)
+
+
+def _night_time_line(result: SimResult, max_nights: int = 12) -> str:
+    """Follow-up minutes per night and the share of that night, on one line.
+
+    Elided in the middle like `_night_progression`, and keyed the same way, so
+    the two lines can be read against each other night for night.
+
+    Parameters
+    ----------
+    result : `SimResult`
+        Completed simulation with ``campaign_time["by_night"]`` populated.
+    max_nights : `int`
+        Most nights to name before eliding.
+
+    Returns
+    -------
+    line : `str`
+        Empty when the campaign time was not measured.
+    """
+    by_night = (result.campaign_time or {}).get("by_night") or {}
+    if not by_night:
+        return ""
+    parts = []
+    for night in sorted(by_night, key=lambda k: int(k)):
+        entry = by_night[night]
+        minutes = float(entry.get("too_s", 0.0)) / 60.0
+        if minutes <= 0:
+            continue
+        label = f"{int(night):+d}" if result.trigger_night is not None else str(night)
+        parts.append(f"n{label} {minutes:.0f} min ({100 * float(entry.get('fraction', 0.0)):.0f}%)")
+    if not parts:
+        return ""
     if len(parts) > max_nights:
         parts = parts[: max_nights - 1] + ["..."] + parts[-1:]
     return " → ".join(parts)
@@ -565,14 +661,22 @@ def build_sim_figures_blocks(result: SimResult, config: Config) -> list[dict[str
     if result.curve_plot:
         described.append(
             f"Cumulative coverage of the localization {result.quantity} against time, "
-            f"per band, over the {result.nights}-night simulation."
+            f"per band, over the {result.nights}-night simulation. The black lines are "
+            f"the any-band total: solid for the ToO follow-up alone, dashed once the "
+            f"nominal-cadence visits that fell on the localization are added."
         )
     if result.nightly_coverage_plot:
-        described.append(
+        nightly_text = (
             "The same coverage night by night: what each band added on each night, "
             "with the running any-band total over it. Every night of the run is on "
             "it, from the same ToO follow-up visits the coverage numbers come from."
         )
+        if (result.campaign_time or {}).get("by_night"):
+            nightly_text += (
+                " The lower panel is the observing time each night: the follow-up's "
+                "share in red against everything observed in grey."
+            )
+        described.append(nightly_text)
     if result.nightly_plots:
         described.append(
             f"Per-band visit counts for every night whose visits overlap the "

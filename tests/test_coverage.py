@@ -9,34 +9,57 @@ from conftest import NSIDE, disc_reward_map
 from chatterbox.astro.skymap import localization_from_probability, localization_from_reward_map
 from chatterbox.sim.coverage import (
     BANDS,
+    any_band_curve,
     band_coverage,
     band_coverage_by_epoch,
+    campaign_time,
+    compare_coverage,
     coverage_by_night,
     coverage_curve,
+    survey_visits,
+    too_mask,
     too_visits,
 )
 
 NSIDE_MAP = 128
 
 
-def make_visits(pointings, band="g", epoch=0, mjd0=61265.0, night=0, nights=None):
+def make_visits(
+    pointings,
+    band="g",
+    epoch=0,
+    mjd0=61265.0,
+    night=0,
+    nights=None,
+    note=None,
+    reason=None,
+    visittime=34.0,
+    slewtime=6.0,
+    exptime=30.0,
+):
     """Build a visit table as ``sim_runner`` writes it (RA/Dec radians).
 
     ``nights`` assigns one night per pointing; ``night`` puts them all on the
-    same one.
+    same one. ``note`` adds a ``scheduler_note`` column, which the real
+    ``ObservationArray`` always has but which is left out by default so tests
+    can exercise one tag at a time.
     """
     rows = []
     for n, (ra, dec) in enumerate(pointings):
-        rows.append(
-            {
-                "RA": np.radians(ra),
-                "dec": np.radians(dec),
-                "band": band,
-                "observation_reason": f"too_GW_case_B_C_0_i{epoch}",
-                "mjd": mjd0 + n / 1440.0,
-                "night": nights[n] if nights is not None else night,
-            }
-        )
+        row = {
+            "RA": np.radians(ra),
+            "dec": np.radians(dec),
+            "band": band,
+            "observation_reason": reason if reason is not None else f"too_GW_case_B_C_0_i{epoch}",
+            "mjd": mjd0 + n / 1440.0,
+            "night": nights[n] if nights is not None else night,
+            "visittime": visittime,
+            "slewtime": slewtime,
+            "exptime": exptime,
+        }
+        if note is not None:
+            row["scheduler_note"] = note
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -441,3 +464,269 @@ def test_without_an_anchor_the_survey_nights_are_reported(spread_localization):
     nightly = coverage_by_night(visits, spread_localization)
     assert nightly.reference_night is None
     assert list(nightly.as_dict()) == ["11"]
+
+
+# ------------------------------------------ recognising the follow-up visits
+
+
+def test_the_scheduler_note_alone_identifies_the_follow_up():
+    """An opsim export need not carry observation_reason at all."""
+    visits = make_visits([(60.0, -35.0)], note="ToO, GW_case_B_C, g, 0, i2").drop(
+        columns=["observation_reason"]
+    )
+    selected = too_visits(visits)
+    assert len(selected) == 1
+    assert selected["too_epoch"].iloc[0] == 2, "the epoch is in the note too"
+
+
+def test_either_tag_is_enough_and_the_union_is_taken(caplog):
+    """A rename upstream should cost a warning, not an empty selection.
+
+    Both fields are written by ``ToOScriptedSurvey`` for every follow-up visit,
+    so a visit tagged by one and not the other means an upstream convention
+    moved -- which is invisible if only one field is ever consulted.
+    """
+    tagged_both = make_visits([(60.0, -35.0)], note="ToO, GW_case_B_C, g, 0, i0")
+    note_only = make_visits([(61.0, -35.0)], reason="pairs_ri_33", note="ToO, BBH, g, 0, i1")
+    reason_only = make_visits([(62.0, -35.0)], note="long_gap_near_sun, 33")
+    survey = make_visits([(10.0, 10.0)], reason="pairs_ri_33", note="pairs_ri_33")
+    visits = pd.concat([tagged_both, note_only, reason_only, survey], ignore_index=True)
+
+    with caplog.at_level("WARNING"):
+        mask = too_mask(visits)
+    assert mask.tolist() == [True, True, True, False]
+    assert "tagged ToO by one field but not the other" in caplog.text
+
+
+def test_a_survey_whose_name_merely_contains_too_is_not_follow_up():
+    """`ToO` has to be a word in the note, or "tooth" would match."""
+    visits = make_visits([(60.0, -35.0)], reason="tooth_fairy_survey", note="tooth_fairy_survey")
+    assert not too_mask(visits).any()
+
+
+def test_the_epoch_is_read_from_the_note_when_the_reason_has_none():
+    """A survey configured with a constant reason still has epochs."""
+    visits = make_visits([(60.0, -35.0)], reason="too_gw_case_b_c", note="ToO, GW_case_B_C, g, 0, i4")
+    assert too_visits(visits)["too_epoch"].iloc[0] == 4
+
+
+def test_survey_visits_is_the_complement_of_the_follow_up():
+    too = make_visits([(60.0, -35.0)])
+    survey = make_visits([(10.0, 10.0)], reason="pairs_ri_33")
+    visits = pd.concat([too, survey], ignore_index=True)
+
+    assert len(too_visits(visits)) == 1
+    assert len(survey_visits(visits)) == 1
+    assert len(too_visits(visits)) + len(survey_visits(visits)) == len(visits)
+
+
+def test_recognising_follow_up_needs_at_least_one_tag():
+    with pytest.raises(KeyError, match="observation_reason"):
+        too_mask(pd.DataFrame({"band": ["g"]}))
+
+
+# ----------------------------------------------------- ToO versus ToO + survey
+
+
+def test_the_survey_contribution_is_reported_separately(spread_localization):
+    """The point of issue #2: which number is the strategy, which is reality.
+
+    The localization is wider than one field, and the survey visit sits on a
+    part of it the follow-up never reached, so the survey's contribution is
+    real rather than a repeat.
+    """
+    follow_up = make_visits([(58.5, -35.0)], band="g")
+    survey = make_visits([(61.5, -35.0)], band="r", reason="pairs_ri_33")
+    visits = pd.concat([follow_up, survey], ignore_index=True)
+
+    comparison = compare_coverage(visits, spread_localization)
+    assert comparison.too_n_visits == 1
+    assert comparison.survey_n_visits == 1
+    # The follow-up is g only, so r coverage can only come from the survey.
+    assert comparison.too.fractions["r"] == 0.0
+    assert comparison.combined.fractions["r"] > 0.0
+    assert comparison.survey_gain["any"] > 0.0
+    assert comparison.combined.any_band > comparison.too.any_band
+
+
+def test_combined_coverage_is_never_below_the_follow_up_alone(spread_localization):
+    """Painting is monotonic in the visit set, so this cannot be violated."""
+    follow_up = make_visits([(60.0, -35.0), (62.0, -35.0)], band="g")
+    survey = make_visits([(61.0, -34.0)], band="i", reason="pairs_ri_33")
+    visits = pd.concat([follow_up, survey], ignore_index=True)
+
+    comparison = compare_coverage(visits, spread_localization)
+    for band in BANDS:
+        assert comparison.combined.fractions[band] >= comparison.too.fractions[band] - 1e-9
+        assert comparison.survey_gain[band] >= -1e-9
+    assert comparison.survey_gain["any"] >= -1e-9
+
+
+def test_a_survey_visit_repeating_the_follow_up_adds_nothing(point_localization):
+    """Survey visits re-cover what the follow-up reached; only new area counts.
+
+    This is why the combined number is not the sum of the two.
+    """
+    follow_up = make_visits([(60.0, -35.0)], band="g")
+    survey = make_visits([(60.0, -35.0)], band="g", reason="pairs_ri_33")
+    visits = pd.concat([follow_up, survey], ignore_index=True)
+
+    comparison = compare_coverage(visits, point_localization)
+    assert comparison.survey_gain["any"] == pytest.approx(0.0, abs=1e-6)
+    assert comparison.combined.any_band == pytest.approx(comparison.too.any_band, abs=1e-6)
+
+
+def test_the_comparison_ignores_visits_that_cannot_touch_the_localization(point_localization):
+    follow_up = make_visits([(60.0, -35.0)], band="g")
+    far_away = make_visits([(180.0, 40.0)], band="r", reason="pairs_ri_33")
+    visits = pd.concat([follow_up, far_away], ignore_index=True)
+
+    comparison = compare_coverage(visits, point_localization)
+    assert comparison.survey_n_visits == 0
+    assert comparison.survey_gain["any"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_the_any_band_curve_ends_where_the_total_does(spread_localization):
+    visits = too_visits(make_visits([(60.0, -35.0), (61.0, -35.0), (62.0, -34.0)], band="g"))
+    times, cumulative = any_band_curve(visits, spread_localization)
+
+    assert times.size == cumulative.size == 3
+    assert np.all(np.diff(cumulative) >= -1e-12), "cumulative coverage cannot fall"
+    total = band_coverage(visits, spread_localization).any_band
+    assert cumulative[-1] == pytest.approx(total, abs=1e-9)
+
+
+def test_the_any_band_curve_of_nothing_is_empty(point_localization):
+    times, cumulative = any_band_curve(make_visits([]), point_localization)
+    assert times.size == 0 and cumulative.size == 0
+
+
+# ------------------------------------------------------------- campaign time
+
+
+def test_campaign_time_charges_the_slew_as_well_as_the_visit():
+    """A ToO interruption costs the survey the slew to the target too."""
+    follow_up = make_visits([(60.0, -35.0), (60.5, -35.0)], visittime=34.0, slewtime=6.0)
+    timing = campaign_time(follow_up)
+
+    assert timing.n_too_visits == 2
+    assert timing.too_seconds == pytest.approx(2 * 40.0)
+    assert timing.too_open_shutter_s == pytest.approx(2 * 30.0)
+    assert timing.measure == "visittime + slewtime"
+
+
+def test_campaign_time_reports_the_share_of_the_nights_it_touched():
+    """The denominator is the campaign's own nights, not the whole run.
+
+    Including nights the campaign never touched would push the share towards
+    zero and say nothing about the trade the scheduler actually made.
+    """
+    follow_up = make_visits([(60.0, -35.0)], night=11, visittime=34.0, slewtime=6.0)
+    same_night = make_visits([(10.0, 10.0)] * 3, night=11, reason="pairs_ri_33", visittime=34.0, slewtime=6.0)
+    other_night = make_visits(
+        [(10.0, 10.0)] * 20, night=12, reason="pairs_ri_33", visittime=34.0, slewtime=6.0
+    )
+    visits = pd.concat([follow_up, same_night, other_night], ignore_index=True)
+
+    timing = campaign_time(visits)
+    assert timing.nights == 1
+    assert timing.n_all_visits == 4, "only night 11 is in the denominator"
+    assert timing.fraction == pytest.approx(1 / 4)
+
+
+def test_campaign_time_is_keyed_from_the_trigger_night():
+    visits = pd.concat(
+        [
+            make_visits([(60.0, -35.0)], night=11),
+            make_visits([(60.5, -35.0)], night=12),
+            make_visits([(10.0, 10.0)] * 3, night=12, reason="pairs_ri_33"),
+        ],
+        ignore_index=True,
+    )
+    timing = campaign_time(visits, reference_night=11)
+
+    assert sorted(timing.by_night) == ["0", "1"]
+    assert timing.by_night["0"]["fraction"] == pytest.approx(1.0), "night 0 was all follow-up"
+    assert timing.by_night["1"]["fraction"] == pytest.approx(1 / 4)
+    assert timing.by_night["1"]["n_too"] == 1
+    for entry in timing.by_night.values():
+        assert 0.0 <= entry["fraction"] <= 1.0
+
+
+def test_campaign_time_splits_by_band_and_epoch():
+    visits = pd.concat(
+        [
+            make_visits([(60.0, -35.0)], band="g", epoch=0),
+            make_visits([(60.5, -35.0)], band="r", epoch=1, mjd0=61265.0 + 1 / 1440.0),
+        ],
+        ignore_index=True,
+    )
+    timing = campaign_time(visits)
+
+    assert timing.by_band == {"g": pytest.approx(40.0), "r": pytest.approx(40.0)}
+    assert timing.by_epoch == {"0": pytest.approx(40.0), "1": pytest.approx(40.0)}
+    assert timing.span_hours == pytest.approx(1 / 60.0, abs=1e-6)
+
+
+def test_campaign_time_says_when_it_could_only_count_exposures(caplog):
+    """An undercount must not read as a cheap campaign."""
+    visits = make_visits([(60.0, -35.0)]).drop(columns=["visittime", "slewtime"])
+    with caplog.at_level("WARNING"):
+        timing = campaign_time(visits)
+
+    assert timing.too_seconds == pytest.approx(30.0)
+    assert "no visittime or slewtime" in timing.measure
+    assert "readout and slew" in caplog.text
+
+
+def test_no_follow_up_visits_means_no_campaign_time():
+    visits = make_visits([(10.0, 10.0)], reason="pairs_ri_33")
+    timing = campaign_time(visits)
+
+    assert timing.n_too_visits == 0
+    assert timing.too_seconds == 0.0
+    assert timing.by_night == {}
+
+
+def test_campaign_time_survives_a_duplicated_index():
+    """Concatenating without ignore_index must not mis-attribute time."""
+    visits = pd.concat([make_visits([(60.0, -35.0)]), make_visits([(10.0, 10.0)] * 3, reason="pairs_ri_33")])
+    assert not visits.index.is_unique, "the situation being guarded against"
+
+    timing = campaign_time(visits)
+    assert timing.n_too_visits == 1
+    assert timing.too_seconds == pytest.approx(40.0)
+    assert timing.fraction == pytest.approx(1 / 4)
+
+
+def test_a_follow_up_visit_outside_the_contour_is_still_counted(caplog):
+    """The bug the monotonicity guard caught: combined fell below ToO-only.
+
+    Coverage is integrated over the whole map, but the overlap pre-selection
+    tests the boresight against the *credible region* dilated by the field of
+    view. A real skymap has faint probability outside its own 90% contour, so a
+    follow-up pointing just beyond the contour still collects weight -- and
+    dropping it from the combined set made the combined number smaller than the
+    ToO-only number it is supposed to contain.
+    """
+    prob = np.zeros(hp.nside2npix(NSIDE_MAP))
+    centre = hp.ang2vec(60.0, -35.0, lonlat=True)
+    vectors = np.array(hp.pix2vec(NSIDE_MAP, np.arange(prob.size)))
+    seps = np.degrees(np.arccos(np.clip(vectors.T @ centre, -1.0, 1.0)))
+    prob = np.exp(-0.5 * (seps / 2.0) ** 2)  # tails everywhere, as BAYESTAR has
+    prob /= prob.sum()
+    localization = localization_from_probability(prob, provenance="test", credible_level=0.9)
+
+    # Far enough out that the dilated contour does not contain the boresight,
+    # near enough that the disc still lands on real probability.
+    outside = make_visits([(60.0, -27.0)], band="g")
+    from chatterbox.sim.coverage import visits_overlapping
+
+    assert visits_overlapping(outside, localization).empty, "the setup being guarded"
+    assert band_coverage(outside, localization).fractions["g"] > 0, "but it does cover weight"
+
+    with caplog.at_level("WARNING"):
+        comparison = compare_coverage(outside, localization)
+    assert comparison.combined.any_band >= comparison.too.any_band
+    assert comparison.survey_gain["any"] >= 0.0
+    assert "should be impossible" not in caplog.text

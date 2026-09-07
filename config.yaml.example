@@ -184,7 +184,9 @@ sim:
   # One figure of coverage gained per night, per band, with the running any-band
   # total drawn over it. Separate from nightly_plots: this is a single image
   # whatever the run length, and it covers every night, including the ones the
-  # cap above leaves out.
+  # cap above leaves out. A lower panel shows the observing time the follow-up
+  # took each night against everything observed that night, which is what says
+  # whether the coverage was worth its cost.
   nightly_coverage_plot: true
 
 paths:
