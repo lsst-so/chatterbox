@@ -432,3 +432,41 @@ def test_an_unreadable_observatory_leaves_nights_unanchored(caplog):
     with caplog.at_level("WARNING"):
         assert _trigger_night(SimpleNamespace(), 60991.0) is None
     assert "which night the trigger fell on" in caplog.text
+
+
+# ------------------------------------------- the driver's own result contract
+
+
+def test_every_result_key_the_driver_writes_survives_the_round_trip():
+    """`load_sim_result` drops unknown keys silently, so a typo would vanish.
+
+    The driver runs in another process, and a measurement that never reaches
+    `SimResult` never reaches the channel either -- with nothing raised
+    anywhere. This is the only cheap guard against that.
+    """
+    import re
+    from pathlib import Path
+
+    from chatterbox.sim.runner import SimResult
+
+    source = Path("chatterbox/sim/driver.py").read_text()
+    written = set(re.findall(r'result\["([a-z_]+)"\]\s*=', source))
+    unknown = written - set(SimResult.__dataclass_fields__)
+    assert not unknown, f"driver writes result keys SimResult does not have: {sorted(unknown)}"
+    # And the measurements issue #2 asked for are among them.
+    for key in ("coverage", "coverage_combined", "survey_gain", "campaign_time"):
+        assert key in written
+
+
+def test_the_driver_measures_coverage_both_ways():
+    """A regression guard on the decomposition, not on the numbers.
+
+    The ToO-only number measures the strategy; the combined number is what the
+    localization actually received. Measuring only one of them was the state
+    issue #2 reported.
+    """
+    from pathlib import Path
+
+    source = Path("chatterbox/sim/driver.py").read_text()
+    assert "compare_coverage(" in source
+    assert "campaign_time(" in source

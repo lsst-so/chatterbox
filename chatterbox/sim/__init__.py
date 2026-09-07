@@ -2,13 +2,20 @@
 
 from .coverage import (
     BANDS,
+    CampaignTime,
+    CoverageComparison,
     CoverageResult,
     NightlyCoverage,
+    any_band_curve,
     band_coverage,
     band_coverage_by_epoch,
+    campaign_time,
+    compare_coverage,
     coverage_by_night,
     coverage_curve,
     nightly_visit_maps,
+    survey_visits,
+    too_mask,
     too_visits,
     visits_overlapping,
 )
@@ -23,8 +30,15 @@ from .runner import SimJob, SimResult, launch_simulation, load_sim_result
 
 __all__ = [
     "BANDS",
+    "CampaignTime",
+    "CoverageComparison",
     "CoverageResult",
     "NightlyCoverage",
+    "any_band_curve",
+    "campaign_time",
+    "compare_coverage",
+    "survey_visits",
+    "too_mask",
     "too_visits",
     "band_coverage",
     "band_coverage_by_epoch",

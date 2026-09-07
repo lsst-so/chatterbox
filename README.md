@@ -31,20 +31,34 @@ result of a scheduler simulation.
 **In-thread when the simulation finishes** (~40 s for 1 night, tens of minutes
 for a full 20–50 night run):
 
-- **Expected fraction of the localization covered in each band**, plus a
-  per-epoch breakdown, a night-by-night cumulative progression, and an
-  "any band" total.
+- **Expected fraction of the localization covered in each band**, given twice:
+  once for the **ToO follow-up alone**, which is what measures the strategy, and
+  once with the **nominal-cadence visits that landed on the localization**
+  added, which is what the event actually received. The difference between them
+  is stated rather than left to be worked out — and it is the *incremental*
+  area the survey added, since survey visits re-cover pixels the follow-up
+  already reached, so the two rows do not sum.
+- **What the campaign cost**: observing time the follow-up took, the nights it
+  spanned, and its share of everything observed on those nights. Coverage
+  without its cost cannot say whether a strategy is worth running.
+- A per-epoch breakdown, a night-by-night cumulative progression with the
+  follow-up minutes beside it, and an "any band" total.
 
 **And, in a thread of its own, every figure that simulation produced**, in this
 order, with a numbered line naming each one:
 
-1. **The cumulative-coverage curve** against time, per band, over the whole run.
+1. **The cumulative-coverage curve** against time, per band, over the whole
+   run, with the two any-band totals in black over them: solid for the ToO
+   follow-up alone, dashed once the nominal-cadence visits on the localization
+   are added. The gap between the two lines is the survey's contribution.
 2. **Coverage gained per night** — one bar per band per night, with the running
    any-band total stepped over the top, on an axis of **nights since the
    trigger**. This is the same total the threaded reply quotes, so the last
    point on the line can be checked against the text, and it covers *every*
-   night of the run, including any the per-night maps below leave out. Set
-   `sim.nightly_coverage_plot: false` to skip it.
+   night of the run, including any the per-night maps below leave out. A lower
+   panel carries the campaign's cost on the same night axis: follow-up minutes
+   against everything observed that night. Set `sim.nightly_coverage_plot:
+   false` to skip it.
 3. **Per-night, per-band maps of simulated visit counts** with the localization
    contour drawn on top, one figure per night. Only nights with visits that
    overlap the contour are plotted; every visit counts towards that, not just
@@ -354,6 +368,43 @@ somewhere other than the trigger's night — the driver logs a warning and the
 figure marks the boundary rather than quietly folding those visits into the
 first epoch, since a pre-trigger night is nominal cadence, not follow-up.
 
+## Which visits count as follow-up
+
+Every measurement that says "ToO" rests on telling the follow-up apart from the
+nominal cadence, and `ToOScriptedSurvey` marks each visit it schedules twice:
+
+- `observation_reason` = `too_{target_name_base}_{too_id}_i{epoch}`
+- `scheduler_note` = `"{survey_name}, {band}, {too_id}, i{epoch}"`, and every
+  ToO survey in `ts_fbs_utils` names itself `"ToO, …"`.
+
+Either alone identifies a visit, and **both are checked**: a visit tagged by one
+field and not the other is logged as a warning rather than silently dropped or
+silently included, because that disagreement is the only signal an upstream tag
+was renamed. `ToO` has to be a whole word in the note, so a survey called
+`tooth_…` does not match. The epoch is read from `observation_reason` first and
+from the note only as a fallback, since the note is a 60-character field that a
+long survey name plus a long id can truncate.
+
+Passing `observation_reason` to the survey constructor appends a
+`TrackingInfoDetailer`, which fills only fields that are still empty — checked
+in both rubin_scheduler 3.22 and 4.1.0 — so the per-visit value above, epoch
+suffix included, survives dispatch.
+
+`target_name` is deliberately not used: it is a comma-joined list of every
+survey that claimed the field.
+
+## Time accounting
+
+The campaign's cost is `visittime + slewtime` over the follow-up visits: the
+visit itself, plus the slew the interruption made the survey pay. The
+denominator is every visit on **the nights the campaign touched** — including
+nights it never reached would push the share towards zero and say nothing about
+the trade the scheduler actually made.
+
+An opsim export need not carry `slewtime`, in which case the fallback is
+`exptime` alone and both the log and the Slack post say the number is a floor,
+so an undercount cannot read as a cheap campaign.
+
 ## The one thing to understand: area vs probability
 
 The producer's output record carries exactly nine fields. It computes FAR,
@@ -410,7 +461,7 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 .venv/bin/python -m pytest
 ```
 
-407 tests, no network access required. Notable checks:
+446 tests, no network access required. Notable checks:
 
 - The dark-hours map is validated against `astropy`'s full `AltAz` transform —
   an independent code path from the fast approximation used in production —
@@ -434,6 +485,17 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 - Splitting coverage by night gives the same total as measuring it in one pass,
   so the last point on the per-night figure always agrees with the percentage
   quoted in the thread. A second night over the same field adds nothing.
+- Combined coverage is never below ToO-only coverage, per band and any-band:
+  painting is monotonic in the visit set, so a violation would mean the two
+  sides were measured against different maps. A survey visit repeating a
+  follow-up pointing is asserted to add exactly nothing.
+- A follow-up visit is recognised by *either* tag it carries, and a visit
+  tagged by one and not the other is a logged warning rather than a silently
+  empty selection — that disagreement is the only signal an upstream rename
+  gives. `tooth_survey` is asserted not to match.
+- Every `result.json` key the driver writes is a `SimResult` field. The driver
+  runs in another process and unknown keys are dropped silently, so a typo
+  would otherwise lose a measurement with nothing raised anywhere.
 - A flattened EFD row rebuilds into a record that the same decoder accepts, with
   the same area and centroid as the record it came from — asserted against a
   deliberately shuffled column order, since lexical sorting is wrong in a way

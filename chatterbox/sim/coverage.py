@@ -30,9 +30,17 @@ from ..models import Localization
 __all__ = [
     "BANDS",
     "FOV_RADIUS_DEG",
+    "CampaignTime",
+    "CoverageComparison",
     "CoverageResult",
     "NightlyCoverage",
+    "any_band_curve",
+    "campaign_time",
+    "compare_coverage",
+    "too_epoch_of",
+    "too_mask",
     "too_visits",
+    "survey_visits",
     "band_coverage",
     "band_coverage_by_epoch",
     "coverage_by_night",
@@ -55,11 +63,46 @@ BANDS = ("u", "g", "r", "i", "z", "y")
 #: This ignores the real focal-plane geometry and chip gaps.
 FOV_RADIUS_DEG = 1.75
 
-#: ToO visits are tagged ``too_{target_name_base}_{too_id}_i{epoch}`` in
-#: ``observation_reason`` by ``ToOScriptedSurvey``. ``target_name`` is a
-#: comma-joined list of every survey that claimed the field, so it is not a
-#: reliable filter; ``observation_reason`` is.
+#: ToO visits carry two independent marks, both written by
+#: ``ToOScriptedSurvey._new_event``:
+#:
+#: * ``observation_reason = too_{target_name_base}_{too_id}_i{epoch}``
+#: * ``scheduler_note = "{survey_name}, {band}, {too_id}, i{epoch}"``, where
+#:   every ToO survey in ``ts_fbs_utils`` names itself ``"ToO, ..."``.
+#:
+#: Either alone identifies the follow-up, and both are checked: a rename
+#: upstream then costs a warning rather than a silently empty selection.
+#: ``target_name`` is *not* usable -- it is a comma-joined list of every survey
+#: that claimed the field.
+#:
+#: Passing ``observation_reason`` to the survey constructor appends a
+#: ``TrackingInfoDetailer``, which only fills fields that are still empty, so
+#: the per-observation value above -- epoch suffix included -- survives.
 _REASON_RE = re.compile(r"^too_(?P<base>.+)_i(?P<epoch>\d+)$")
+
+#: Loose test for the ToO prefix of ``observation_reason``, which the epoch
+#: regex above is too strict for: a survey configured with a constant reason
+#: has no ``_i{epoch}`` suffix but is still follow-up.
+_REASON_PREFIX_RE = re.compile(r"^too_", re.IGNORECASE)
+
+#: ``ToO`` as a whole word in ``scheduler_note``, so ``tooth_survey`` does not
+#: match. Anchored on non-letters rather than ``\b`` because the note's
+#: separators are commas and spaces.
+_NOTE_RE = re.compile(r"(?:^|[^A-Za-z])too(?:[^A-Za-z]|$)", re.IGNORECASE)
+
+#: Trailing ``i{epoch}`` of either field. ``scheduler_note`` is a 60-character
+#: field, so a long survey name plus a long ToO id can truncate this away --
+#: which is why ``observation_reason`` is read first.
+_EPOCH_RE = re.compile(r"i(\d+)\s*$")
+
+#: Columns a ToO visit can be recognised by, in the order they are trusted.
+_TAG_COLUMNS = ("observation_reason", "scheduler_note")
+
+#: Per-visit time columns. ``visittime`` is the on-sky visit (exposures plus
+#: readout); ``slewtime`` is what the survey paid to get there, which a ToO
+#: interruption is directly responsible for. Both are in the
+#: ``ObservationArray`` dtype.
+_VISIT_TIME_COLUMNS = ("visittime", "slewtime")
 
 #: Pointing column conventions, in preference order, as
 #: ``(ra_col, dec_col, in_radians)``.
@@ -235,6 +278,95 @@ class NightlyCoverage:
         return ", ".join(parts) if parts else "no nights with visits"
 
 
+def too_mask(visits: pd.DataFrame, too_id: str | None = None) -> pd.Series:
+    """Boolean mask of the ToO follow-up visits.
+
+    Recognises a visit by ``observation_reason`` starting with ``too_`` *or*
+    ``scheduler_note`` naming ``ToO`` -- see `_TAG_COLUMNS`. When both columns
+    are present but disagree the union is used and the disagreement is logged,
+    because that is the signal an upstream tag changed and it is otherwise
+    invisible.
+
+    Parameters
+    ----------
+    visits : `pandas.DataFrame`
+        Simulated observations, as written by ``sim_runner``.
+    too_id : `str`, optional
+        Restrict to one ToO id, matching the ``_{id}_i{epoch}`` part of
+        ``observation_reason`` or the ``, {id}, i{epoch}`` tail of
+        ``scheduler_note``.
+
+    Returns
+    -------
+    mask : `pandas.Series` of `bool`
+        Indexed like `visits`.
+
+    Raises
+    ------
+    KeyError
+        When neither tag column is present, since then nothing can be said
+        about which visits were follow-up.
+    """
+    present = [column for column in _TAG_COLUMNS if column in visits.columns]
+    if not present:
+        raise KeyError(
+            f"Visit table has none of {list(_TAG_COLUMNS)}, so ToO visits cannot be "
+            f"identified; have {list(visits.columns)}"
+        )
+
+    masks: dict[str, pd.Series] = {}
+    if "observation_reason" in present:
+        reason = visits["observation_reason"].astype(str)
+        masks["observation_reason"] = reason.str.match(_REASON_PREFIX_RE)
+    if "scheduler_note" in present:
+        note = visits["scheduler_note"].astype(str)
+        masks["scheduler_note"] = note.str.contains(_NOTE_RE)
+
+    mask = pd.Series(False, index=visits.index)
+    for column_mask in masks.values():
+        mask |= column_mask.fillna(False)
+
+    if len(masks) == 2:
+        left, right = masks["observation_reason"], masks["scheduler_note"]
+        disagreements = int((left != right).sum())
+        if disagreements:
+            logger.warning(
+                "%d visit(s) are tagged ToO by one field but not the other "
+                "(observation_reason: %d, scheduler_note: %d); taking the union. "
+                "An upstream tag may have been renamed",
+                disagreements,
+                int(left.sum()),
+                int(right.sum()),
+            )
+
+    if too_id is not None:
+        wanted = pd.Series(False, index=visits.index)
+        if "observation_reason" in present:
+            wanted |= visits["observation_reason"].astype(str).str.contains(f"_{too_id}_i", regex=False)
+        if "scheduler_note" in present:
+            wanted |= visits["scheduler_note"].astype(str).str.contains(f", {too_id}, i", regex=False)
+        mask &= wanted
+
+    return mask
+
+
+def too_epoch_of(reason: str, note: str = "") -> int:
+    """Which follow-up epoch a visit belongs to, or ``-1`` if unknown.
+
+    ``observation_reason`` is read first and ``scheduler_note`` used as a
+    fallback, so an epoch is still recovered when a survey was configured with
+    a constant reason that carries no ``_i{epoch}`` suffix.
+    """
+    match = _REASON_RE.match(str(reason))
+    if match is not None:
+        return int(match.group("epoch"))
+    for value in (reason, note):
+        found = _EPOCH_RE.search(str(value))
+        if found is not None:
+            return int(found.group(1))
+    return -1
+
+
 def too_visits(visits: pd.DataFrame, too_id: str | None = None) -> pd.DataFrame:
     """Select the ToO follow-up visits from a simulation output.
 
@@ -243,27 +375,61 @@ def too_visits(visits: pd.DataFrame, too_id: str | None = None) -> pd.DataFrame:
     visits : `pandas.DataFrame`
         Simulated observations, as written by ``sim_runner``.
     too_id : `str`, optional
-        Restrict to one ToO id, matching the ``_{id}_i{epoch}`` part of
-        ``observation_reason``.
+        Restrict to one ToO id.
 
     Returns
     -------
     selected : `pandas.DataFrame`
-        With an added integer ``too_epoch`` column.
+        With an added integer ``too_epoch`` column, ``-1`` where no epoch could
+        be read from either tag.
+
+    See Also
+    --------
+    survey_visits : the complement, everything the nominal survey did.
     """
-    if "observation_reason" not in visits.columns:
-        raise KeyError(f"Visit table has no 'observation_reason' column; have {list(visits.columns)}")
-    reason = visits["observation_reason"].astype(str)
-    mask = reason.str.startswith("too_")
-    if too_id is not None:
-        mask &= reason.str.contains(f"_{too_id}_i", regex=False)
+    mask = too_mask(visits, too_id=too_id)
     selected = visits.loc[mask].copy()
-    epochs = []
-    for value in selected["observation_reason"].astype(str):
-        match = _REASON_RE.match(value)
-        epochs.append(int(match.group("epoch")) if match else -1)
-    selected["too_epoch"] = epochs
+    reasons = (
+        selected["observation_reason"].astype(str)
+        if "observation_reason" in selected.columns
+        else pd.Series("", index=selected.index)
+    )
+    notes = (
+        selected["scheduler_note"].astype(str)
+        if "scheduler_note" in selected.columns
+        else pd.Series("", index=selected.index)
+    )
+    selected["too_epoch"] = [too_epoch_of(r, n) for r, n in zip(reasons, notes)]
+    unknown = int((selected["too_epoch"] < 0).sum())
+    if unknown:
+        logger.warning(
+            "%d of %d ToO visits carry no epoch in either tag; they are reported "
+            "outside the per-epoch breakdown",
+            unknown,
+            len(selected),
+        )
     logger.info("Selected %d ToO visits out of %d", len(selected), len(visits))
+    return selected
+
+
+def survey_visits(visits: pd.DataFrame) -> pd.DataFrame:
+    """Select everything that is *not* tagged ToO follow-up.
+
+    The nominal-cadence visits. These cover real localization area too, which
+    is why the coverage a trigger actually receives is measured from the union
+    rather than from the follow-up alone; see `compare_coverage`.
+
+    Parameters
+    ----------
+    visits : `pandas.DataFrame`
+        Simulated observations.
+
+    Returns
+    -------
+    selected : `pandas.DataFrame`
+    """
+    selected = visits.loc[~too_mask(visits)].copy()
+    logger.info("Selected %d nominal-survey visits out of %d", len(selected), len(visits))
     return selected
 
 
@@ -485,6 +651,384 @@ def band_coverage_by_epoch(
         per_epoch = band_coverage(subset, localization, **kwargs)
         result.epochs[int(epoch)] = per_epoch.fractions
     return result
+
+
+@dataclass
+class CoverageComparison:
+    """ToO-only coverage beside the coverage the localization actually got.
+
+    Attributes
+    ----------
+    too : `CoverageResult`
+        From the tagged follow-up visits alone. This is the number that
+        measures the *strategy*.
+    combined : `CoverageResult`
+        From the follow-up plus every nominal-cadence visit that landed on the
+        localization. This is what the event actually received.
+    survey_gain : `dict` [`str`, `float`]
+        ``combined - too`` per band, and under the key ``"any"`` for the
+        any-band totals.
+    too_n_visits, survey_n_visits : `int`
+        Visits behind each side, counted within the same overlapping set.
+
+    Notes
+    -----
+    `combined` is **not** ``too`` plus the survey's own coverage: survey visits
+    re-cover pixels the follow-up already reached, so only the difference
+    `survey_gain` is new. That difference is the honest statement of what the
+    nominal cadence added, and the number to weigh a strategy against.
+    """
+
+    too: CoverageResult
+    combined: CoverageResult
+    survey_gain: dict[str, float] = field(default_factory=dict)
+    too_n_visits: int = 0
+    survey_n_visits: int = 0
+
+    def summary_line(self) -> str:
+        """One line contrasting the two any-band totals."""
+        return (
+            f"ToO only {100 * self.too.any_band:.1f}%, "
+            f"with the nominal survey {100 * self.combined.any_band:.1f}% "
+            f"({100 * self.survey_gain.get('any', 0.0):+.1f} points)"
+        )
+
+
+@dataclass
+class CampaignTime:
+    """Observing time the ToO campaign consumed.
+
+    Attributes
+    ----------
+    too_seconds : `float`
+        Total time attributable to the follow-up: on-sky visit time plus the
+        slew to each pointing.
+    too_open_shutter_s : `float`
+        Exposure time alone, without slew or readout.
+    all_seconds : `float`
+        The same measure over every simulated visit on the nights the campaign
+        touched, which is the denominator of `fraction`.
+    fraction : `float`
+        ``too_seconds / all_seconds``, 0-1. The share of observing time the
+        campaign took from the survey on those nights.
+    n_too_visits, n_all_visits : `int`
+        Visit counts behind those totals.
+    nights : `int`
+        Nights the campaign placed visits on.
+    span_hours : `float`
+        First to last follow-up visit.
+    by_night : `dict` [`str`, `dict`]
+        ``nights since trigger -> {"too_s", "all_s", "n_too", "fraction"}``,
+        keyed like `NightlyCoverage.as_dict`.
+    by_band, by_epoch : `dict` [`str`, `float`]
+        Follow-up seconds per band and per epoch.
+    measure : `str`
+        Which columns the totals came from, so a fallback is never mistaken for
+        the full accounting.
+    """
+
+    too_seconds: float = 0.0
+    too_open_shutter_s: float = 0.0
+    all_seconds: float = 0.0
+    fraction: float = 0.0
+    n_too_visits: int = 0
+    n_all_visits: int = 0
+    nights: int = 0
+    span_hours: float = 0.0
+    by_night: dict[str, dict[str, float]] = field(default_factory=dict)
+    by_band: dict[str, float] = field(default_factory=dict)
+    by_epoch: dict[str, float] = field(default_factory=dict)
+    measure: str = "visittime + slewtime"
+
+    def summary_line(self) -> str:
+        """One line, e.g. ``"38 min over 3 nights -- 7.4% of the time"``."""
+        return (
+            f"{self.n_too_visits:,} visits, {self.too_seconds / 60.0:.0f} min "
+            f"over {self.nights} night{'s' if self.nights != 1 else ''} "
+            f"-- {100 * self.fraction:.1f}% of the observing time on those nights"
+        )
+
+
+def compare_coverage(
+    visits: pd.DataFrame,
+    localization: Localization,
+    fov_radius_deg: float = FOV_RADIUS_DEG,
+    nside: int | None = None,
+    overlapping: pd.DataFrame | None = None,
+    **kwargs,
+) -> CoverageComparison:
+    """Measure the localization's coverage with and without the survey.
+
+    Parameters
+    ----------
+    visits : `pandas.DataFrame`
+        *All* simulated visits, follow-up and nominal cadence alike.
+    localization : `Localization`
+        Localization to integrate.
+    fov_radius_deg : `float`
+        Field-of-view radius, used both for the overlap test and the painting.
+    nside : `int`, optional
+        Resolution of the overlap pre-selection. Defaults to the
+        localization's.
+    overlapping : `pandas.DataFrame`, optional
+        The result of `visits_overlapping` for these visits, when a caller has
+        already computed it. Saves repeating the dilation.
+    **kwargs
+        Forwarded to `band_coverage` and `band_coverage_by_epoch`.
+
+    Returns
+    -------
+    comparison : `CoverageComparison`
+
+    Notes
+    -----
+    The combined side runs on `visits_overlapping` rather than the whole table:
+    a visit that cannot touch the localization cannot change its coverage, so
+    the pre-selection is exact and keeps the extra pass proportional to the
+    localization rather than to the survey.
+    """
+    follow_up = too_visits(visits)
+    too = band_coverage_by_epoch(follow_up, localization, fov_radius_deg=fov_radius_deg, **kwargs)
+
+    if overlapping is None:
+        overlapping = visits_overlapping(
+            visits, localization, fov_radius_deg=fov_radius_deg, nside=nside or localization.nside
+        )
+    if overlapping.empty:
+        combined = too
+        survey_n = 0
+    else:
+        combined = band_coverage(overlapping, localization, fov_radius_deg=fov_radius_deg, **kwargs)
+        survey_n = int(len(overlapping)) - int(too_mask(overlapping).sum())
+
+    gain = {band: combined.fractions.get(band, 0.0) - too.fractions.get(band, 0.0) for band in BANDS}
+    gain["any"] = combined.any_band - too.any_band
+    # Painting is monotonic in the visit set, so a negative gain is impossible
+    # and means the two sides were measured against different maps.
+    negative = {band: value for band, value in gain.items() if value < -1e-9}
+    if negative:
+        logger.warning(
+            "Combined coverage is below ToO-only coverage for %s, which should be "
+            "impossible; the two were measured inconsistently",
+            ", ".join(sorted(negative)),
+        )
+
+    comparison = CoverageComparison(
+        too=too,
+        combined=combined,
+        survey_gain=gain,
+        too_n_visits=int(len(follow_up)),
+        survey_n_visits=survey_n,
+    )
+    logger.info("Coverage (%s): %s", too.quantity, comparison.summary_line())
+    return comparison
+
+
+def campaign_time(
+    visits: pd.DataFrame,
+    reference_night: int | None = None,
+    night_col: str = "night",
+    band_col: str = "band",
+    time_col: str | None = None,
+) -> CampaignTime:
+    """Observing time the ToO follow-up took, and what share of the night.
+
+    Parameters
+    ----------
+    visits : `pandas.DataFrame`
+        *All* simulated visits. The denominator is every visit on the nights
+        the campaign touched, so the follow-up alone is not enough.
+    reference_night : `int`, optional
+        Survey night the trigger fell on, so `CampaignTime.by_night` is keyed
+        by nights since the trigger.
+    night_col, band_col : `str`
+        Column names.
+    time_col : `str`, optional
+        Time column for the campaign span, detected when omitted.
+
+    Returns
+    -------
+    timing : `CampaignTime`
+
+    Notes
+    -----
+    Cost is ``visittime + slewtime``: the visit itself plus the slew that
+    reaching the target required, since an interruption charges the survey for
+    both. When those columns are absent -- an opsim export need not carry
+    ``slewtime`` -- the fallback is ``exptime * nexp``, and
+    `CampaignTime.measure` says which was used.
+    """
+    # A positional index, so a caller that concatenated frames without
+    # ``ignore_index`` cannot make two visits share a label -- which would
+    # mis-attribute time between the follow-up and the survey.
+    visits = visits.reset_index(drop=True)
+    follow_up = too_visits(visits)
+    if follow_up.empty:
+        logger.info("No ToO visits, so no campaign time to account for")
+        return CampaignTime()
+
+    cost, measure = _visit_seconds(visits)
+    shutter, _ = _visit_seconds(visits, open_shutter_only=True)
+    too_rows = too_mask(visits)
+
+    nights = (
+        pd.to_numeric(visits[night_col], errors="coerce")
+        if night_col in visits.columns
+        else pd.Series(np.nan, index=visits.index)
+    )
+    campaign_nights = sorted({int(n) for n in nights[too_rows].dropna().unique()})
+
+    # Only the campaign's own nights are in the denominator: including nights
+    # it never touched would dilute the share towards zero and say nothing
+    # about the trade the scheduler actually made.
+    on_campaign_nights = (
+        nights.isin(campaign_nights) if campaign_nights else pd.Series(True, index=visits.index)
+    )
+    too_seconds = float(cost[too_rows].sum())
+    all_seconds = float(cost[on_campaign_nights].sum())
+
+    by_night: dict[str, dict[str, float]] = {}
+    for night in campaign_nights:
+        here = nights == night
+        night_too = float(cost[here & too_rows].sum())
+        night_all = float(cost[here].sum())
+        label = str(nights_since_trigger([night], reference_night)[0])
+        by_night[label] = {
+            "too_s": night_too,
+            "all_s": night_all,
+            "n_too": int((here & too_rows).sum()),
+            "fraction": night_too / night_all if night_all > 0 else 0.0,
+        }
+
+    by_band: dict[str, float] = {}
+    if band_col in follow_up.columns:
+        bands = follow_up[band_col].astype(str)
+        for band in BANDS:
+            seconds = float(cost[follow_up.index[bands == band]].sum())
+            if seconds > 0:
+                by_band[band] = seconds
+
+    by_epoch: dict[str, float] = {}
+    if "too_epoch" in follow_up.columns:
+        for epoch in sorted(e for e in follow_up["too_epoch"].unique() if e >= 0):
+            by_epoch[str(int(epoch))] = float(cost[follow_up.index[follow_up["too_epoch"] == epoch]].sum())
+
+    span_hours = 0.0
+    time_col = time_col or detect_time_column(visits)
+    if time_col is not None and time_col in follow_up.columns:
+        times = pd.to_numeric(follow_up[time_col], errors="coerce").dropna()
+        if len(times):
+            span_hours = float(times.max() - times.min()) * 24.0
+
+    timing = CampaignTime(
+        too_seconds=too_seconds,
+        too_open_shutter_s=float(shutter[too_rows].sum()),
+        all_seconds=all_seconds,
+        fraction=too_seconds / all_seconds if all_seconds > 0 else 0.0,
+        n_too_visits=int(len(follow_up)),
+        n_all_visits=int(on_campaign_nights.sum()),
+        nights=len(campaign_nights),
+        span_hours=span_hours,
+        by_night=by_night,
+        by_band=by_band,
+        by_epoch=by_epoch,
+        measure=measure,
+    )
+    logger.info("Campaign time (%s): %s", measure, timing.summary_line())
+    return timing
+
+
+def _visit_seconds(visits: pd.DataFrame, open_shutter_only: bool = False) -> tuple[pd.Series, str]:
+    """Seconds attributable to each visit, and which columns they came from.
+
+    Returns
+    -------
+    seconds : `pandas.Series`
+        Indexed like `visits`.
+    measure : `str`
+        Human-readable description of the columns used.
+    """
+    zero = pd.Series(0.0, index=visits.index)
+
+    def column(name: str) -> pd.Series:
+        if name not in visits.columns:
+            return zero
+        return pd.to_numeric(visits[name], errors="coerce").fillna(0.0)
+
+    # exptime is already the total on-sky exposure of the visit in the
+    # scheduler's accounting, so nexp must not multiply it -- that would double
+    # every two-snap visit.
+    exposure = column("exptime")
+    if open_shutter_only:
+        return exposure, "exptime"
+
+    present = [name for name in _VISIT_TIME_COLUMNS if name in visits.columns]
+    if not present:
+        logger.warning(
+            "Visit table has neither %s; falling back to exptime, which omits " "readout and slew overheads",
+            " nor ".join(_VISIT_TIME_COLUMNS),
+        )
+        return exposure, "exptime (no visittime or slewtime column)"
+
+    total = zero.copy()
+    for name in present:
+        total = total + column(name)
+    if len(present) < len(_VISIT_TIME_COLUMNS):
+        logger.info("Campaign time from %s only", " + ".join(present))
+    return total, " + ".join(present)
+
+
+def any_band_curve(
+    visits: pd.DataFrame,
+    localization: Localization,
+    fov_radius_deg: float = FOV_RADIUS_DEG,
+    ra_col: str | None = None,
+    dec_col: str | None = None,
+    time_col: str | None = None,
+    radians: bool | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Cumulative coverage against time, counting a pixel once in any band.
+
+    The single-curve companion to `coverage_curve`, used to draw the ToO-only
+    and ToO-plus-survey totals on one axis.
+
+    Returns
+    -------
+    times : `numpy.ndarray`
+        MJD of each visit, in order.
+    cumulative : `numpy.ndarray`
+        Fraction covered through that visit.
+    """
+    if visits.empty:
+        return np.array([]), np.array([])
+
+    if ra_col is None or dec_col is None:
+        detected_ra, detected_dec, detected_radians = detect_pointing_columns(visits)
+        ra_col = ra_col or detected_ra
+        dec_col = dec_col or detected_dec
+        if radians is None:
+            radians = detected_radians
+    elif radians is None:
+        radians = True
+    time_col = time_col or detect_time_column(visits)
+
+    rows = visits.sort_values(time_col) if time_col is not None else visits
+    ra, dec = _pointings(rows, ra_col, dec_col, radians)
+    if ra.size == 0:
+        return np.array([]), np.array([])
+    _, increments = _accumulate(
+        np.asarray(localization.prob_map, dtype=float),
+        ra,
+        dec,
+        localization.nside,
+        np.radians(fov_radius_deg),
+    )
+    times = (
+        np.asarray(rows[time_col], dtype=float)[: len(increments)]
+        if time_col is not None
+        else np.arange(len(increments), dtype=float)
+    )
+    return times, np.cumsum(increments)
 
 
 def coverage_by_night(
