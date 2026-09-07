@@ -444,7 +444,9 @@ def run_job(job_dir: Path) -> dict[str, Any]:
         # Both totals on one axis: the follow-up alone, and the follow-up plus
         # whatever the nominal cadence contributed.
         too_total = any_band_curve(follow_up, localization)
-        combined_total = any_band_curve(on_localization, localization)
+        # The same rows the combined total was measured from, so the dashed
+        # line cannot disagree with the number in the reply.
+        combined_total = any_band_curve(comparison.combined_visits, localization)
         plot_path = plot_coverage_curve(
             curves,
             localization,

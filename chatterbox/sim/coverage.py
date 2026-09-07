@@ -684,6 +684,10 @@ class CoverageComparison:
     survey_gain: dict[str, float] = field(default_factory=dict)
     too_n_visits: int = 0
     survey_n_visits: int = 0
+    #: The visits `combined` was measured from, so a caller drawing a curve of
+    #: the same quantity uses the same rows rather than rebuilding the set and
+    #: risking a curve that disagrees with the total.
+    combined_visits: pd.DataFrame | None = field(default=None, repr=False, compare=False)
 
     def summary_line(self) -> str:
         """One line contrasting the two any-band totals."""
@@ -782,10 +786,15 @@ def compare_coverage(
 
     Notes
     -----
-    The combined side runs on `visits_overlapping` rather than the whole table:
-    a visit that cannot touch the localization cannot change its coverage, so
-    the pre-selection is exact and keeps the extra pass proportional to the
-    localization rather than to the survey.
+    The nominal-cadence side is pre-selected with `visits_overlapping` so the
+    extra pass stays proportional to the localization rather than to the
+    survey. The follow-up is then added back unconditionally, because that
+    pre-selection is *not* exact for the follow-up: it tests the boresight
+    against the credible region dilated by the field of view, while coverage is
+    integrated over the whole map -- and a real skymap has faint probability
+    outside its own 90% contour. A follow-up pointing just outside the contour
+    still collects weight, so dropping it would put the combined number *below*
+    the ToO-only number.
     """
     follow_up = too_visits(visits)
     too = band_coverage_by_epoch(follow_up, localization, fov_radius_deg=fov_radius_deg, **kwargs)
@@ -794,12 +803,16 @@ def compare_coverage(
         overlapping = visits_overlapping(
             visits, localization, fov_radius_deg=fov_radius_deg, nside=nside or localization.nside
         )
-    if overlapping.empty:
-        combined = too
-        survey_n = 0
+    # Every follow-up visit, plus the nominal-cadence ones that can reach the
+    # localization. Taking the union rather than the pre-selection alone is
+    # what makes `combined >= too` hold by construction; see the note above.
+    nominal = overlapping.loc[~too_mask(overlapping)] if not overlapping.empty else overlapping
+    survey_n = int(len(nominal))
+    combined_rows = pd.concat([follow_up, nominal]) if survey_n else follow_up
+    if survey_n:
+        combined = band_coverage(combined_rows, localization, fov_radius_deg=fov_radius_deg, **kwargs)
     else:
-        combined = band_coverage(overlapping, localization, fov_radius_deg=fov_radius_deg, **kwargs)
-        survey_n = int(len(overlapping)) - int(too_mask(overlapping).sum())
+        combined = too
 
     gain = {band: combined.fractions.get(band, 0.0) - too.fractions.get(band, 0.0) for band in BANDS}
     gain["any"] = combined.any_band - too.any_band
@@ -819,6 +832,7 @@ def compare_coverage(
         survey_gain=gain,
         too_n_visits=int(len(follow_up)),
         survey_n_visits=survey_n,
+        combined_visits=combined_rows,
     )
     logger.info("Coverage (%s): %s", too.quantity, comparison.summary_line())
     return comparison

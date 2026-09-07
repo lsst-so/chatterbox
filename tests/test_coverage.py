@@ -697,3 +697,36 @@ def test_campaign_time_survives_a_duplicated_index():
     assert timing.n_too_visits == 1
     assert timing.too_seconds == pytest.approx(40.0)
     assert timing.fraction == pytest.approx(1 / 4)
+
+
+def test_a_follow_up_visit_outside_the_contour_is_still_counted(caplog):
+    """The bug the monotonicity guard caught: combined fell below ToO-only.
+
+    Coverage is integrated over the whole map, but the overlap pre-selection
+    tests the boresight against the *credible region* dilated by the field of
+    view. A real skymap has faint probability outside its own 90% contour, so a
+    follow-up pointing just beyond the contour still collects weight -- and
+    dropping it from the combined set made the combined number smaller than the
+    ToO-only number it is supposed to contain.
+    """
+    prob = np.zeros(hp.nside2npix(NSIDE_MAP))
+    centre = hp.ang2vec(60.0, -35.0, lonlat=True)
+    vectors = np.array(hp.pix2vec(NSIDE_MAP, np.arange(prob.size)))
+    seps = np.degrees(np.arccos(np.clip(vectors.T @ centre, -1.0, 1.0)))
+    prob = np.exp(-0.5 * (seps / 2.0) ** 2)  # tails everywhere, as BAYESTAR has
+    prob /= prob.sum()
+    localization = localization_from_probability(prob, provenance="test", credible_level=0.9)
+
+    # Far enough out that the dilated contour does not contain the boresight,
+    # near enough that the disc still lands on real probability.
+    outside = make_visits([(60.0, -27.0)], band="g")
+    from chatterbox.sim.coverage import visits_overlapping
+
+    assert visits_overlapping(outside, localization).empty, "the setup being guarded"
+    assert band_coverage(outside, localization).fractions["g"] > 0, "but it does cover weight"
+
+    with caplog.at_level("WARNING"):
+        comparison = compare_coverage(outside, localization)
+    assert comparison.combined.any_band >= comparison.too.any_band
+    assert comparison.survey_gain["any"] >= 0.0
+    assert "should be impossible" not in caplog.text
