@@ -14,9 +14,12 @@ The job directory is the interface between the two processes:
 ``sim.log``          Driver stdout and stderr.
 ``visits.db``        Opsim database: the visit history plus the simulated
                      visits (written by the driver).
-``coverage.png``     Cumulative coverage against time, per band.
+``coverage.png``     Cumulative coverage against time, per band, with the
+                     any-band totals for the follow-up alone and with the
+                     nominal cadence added.
 ``coverage_by_night  Coverage gained on each night, per band, with the running
-.png``               any-band total over it.
+.png``               any-band total over it, and the observing time the
+                     follow-up took each night.
 ``*_night*.png``     Per-night, per-band simulated visit counts.
 ``result.json``      Coverage results and status (written by the driver).
 ===================  =========================================================
@@ -162,6 +165,27 @@ class SimResult:
     n_visits: dict[str, int] = field(default_factory=dict)
     coverage_by_epoch: dict[str, dict[str, float]] = field(default_factory=dict)
     any_band: float = 0.0
+    #: The same per band, but counting nominal-cadence visits that landed on
+    #: the localization as well as the tagged follow-up: what the event
+    #: actually received, rather than what the ToO strategy alone delivered.
+    coverage_combined: dict[str, float] = field(default_factory=dict)
+    any_band_combined: float = 0.0
+    #: ``coverage_combined - coverage`` per band, plus ``"any"``. This is the
+    #: *incremental* area the survey added, not its own coverage: survey visits
+    #: re-cover pixels the follow-up already reached.
+    survey_gain: dict[str, float] = field(default_factory=dict)
+    #: Non-ToO visits that touched the localization, behind `survey_gain`.
+    survey_visits_on_localization: int = 0
+    #: Every visit touching the localization, follow-up or not.
+    localization_visits: int = 0
+    #: Observing time the campaign consumed; see
+    #: `chatterbox.sim.coverage.CampaignTime` for the keys.
+    campaign_time: dict[str, Any] = field(default_factory=dict)
+    #: Coverage of the credible region itself -- probability and area, each as
+    #: a fraction of that region rather than of the whole map. See
+    #: `chatterbox.sim.coverage.RegionCoverage` for the keys. Empty for a
+    #: result produced before this was measured.
+    region_coverage: dict[str, Any] = field(default_factory=dict)
     #: "probability" or "area" -- whether coverage is a real probability.
     quantity: str = "area"
     #: Visits the simulation itself scheduled.
@@ -215,6 +239,25 @@ class SimResult:
     def is_probability_result(self) -> bool:
         """True when `coverage` holds probabilities, not area fractions."""
         return self.quantity == "probability"
+
+    def has_region_coverage(self) -> bool:
+        """True when the credible-region statistics are available.
+
+        Older results predate them, and a run whose region came out empty
+        reports nothing rather than a row of zeros.
+        """
+        region = self.region_coverage
+        if not region:
+            return False
+        return float(region.get("region_area_deg2", 0.0)) > 0.0
+
+    def has_combined_coverage(self) -> bool:
+        """True when the ToO-plus-survey comparison is available.
+
+        False for a result written before it was recorded, which is why the
+        reply falls back to the ToO-only figures rather than showing zeros.
+        """
+        return bool(self.coverage_combined) or self.any_band_combined > 0.0
 
 
 def write_job_spec(trigger: Trigger, config: Config, job_dir: Path, nights: int) -> Path:

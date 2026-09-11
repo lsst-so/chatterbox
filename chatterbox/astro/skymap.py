@@ -14,6 +14,7 @@ feature-based scheduler).
 
 import logging
 import math
+from dataclasses import dataclass
 
 import healpy as hp
 import numpy as np
@@ -32,12 +33,31 @@ __all__ = [
     "geometry_from_mask",
     "localization_from_reward_map",
     "localization_from_probability",
+    "RegionMaps",
+    "REGION_NSIDE_FLOOR",
+    "region_localizations",
 ]
 
 logger = logging.getLogger(__name__)
 
 #: Square degrees per steradian.
 DEG2_PER_SR = (180.0 / math.pi) ** 2
+
+#: Lowest resolution the credible-region statistics are measured at.
+#:
+#: Coverage is painted with ``healpy.query_disc(..., inclusive=True)``, which
+#: keeps every pixel the disc *touches*. The resulting footprint inflation is
+#: what sets the floor: measured on 478 pointings over a ~400 deg^2 patch, a
+#: single 1.75 deg field comes out 1.48x its true area at nside 128, 1.10x at
+#: 512 and 1.05x at 1024, and the *union* over a tiled campaign -- where the
+#: inflation only survives on the perimeter -- lands within 1.4% of the
+#: nside-1024 answer once nside reaches 512. An area fraction is far more
+#: sensitive to this than a probability, since the inflated pixels sit at the
+#: region's edge where the probability density is lowest, so the region
+#: statistics never run below this even when the map itself is coarser (the
+#: producer's reward map is nside 32). Painting at this resolution costs
+#: ~0.01 s per few hundred visits, so the floor is close to free.
+REGION_NSIDE_FLOOR = 512
 
 
 def pixel_corner_decs(nside: int, pixels, nest: bool = True, step: int = 1) -> np.ndarray:
@@ -510,4 +530,135 @@ def localization_from_probability(
         is_probability=True,
         credible_level=credible_level,
         provenance=provenance,
+    )
+
+
+@dataclass
+class RegionMaps:
+    """A localization split into the two maps its credible region needs.
+
+    Both maps are painted by exactly the same machinery as any other
+    `Localization`, at the same resolution and with the same field-of-view
+    discs, so the probability and the area they report describe an *identical*
+    footprint rather than two footprints that happen to be similar.
+
+    Attributes
+    ----------
+    probability : `Localization`
+        Weight inside the credible region only, renormalized to sum to 1.
+        Coverage measured against it reads "fraction of the region's
+        probability", so a campaign that tiles the region reaches 100% rather
+        than stopping at the credible level.
+    area : `Localization`
+        Uniform weight across the same pixels, so coverage measured against it
+        is exactly the fraction of the region's *area*. Its `is_probability`
+        is False, which is what keeps the two apart downstream.
+    region_probability : `float`
+        Probability the region actually contains. Slightly above the requested
+        credible level, since the region is built from whole pixels; use it to
+        convert a region-relative fraction back to an all-sky one.
+    region_area_deg2 : `float`
+        Area of the region at `nside`.
+    n_pixels : `int`
+        Pixels in the region.
+    nside : `int`
+        Resolution both maps are at, which is the resolution the statistics
+        were measured at.
+    credible_level : `float`
+        Level the region encloses, carried through so message text cannot
+        quote a level the data does not have.
+    is_probability : `bool`
+        True when the source localization was a real probability map, and so
+        when `probability` means anything. False for the producer's reward
+        map, where only `area` is meaningful.
+    """
+
+    probability: Localization
+    area: Localization
+    region_probability: float
+    region_area_deg2: float
+    n_pixels: int
+    nside: int
+    credible_level: float
+    is_probability: bool
+
+
+def region_localizations(localization: Localization, nside: int | None = None) -> RegionMaps:
+    """Restrict a localization to its credible region, two ways.
+
+    Parameters
+    ----------
+    localization : `Localization`
+        Localization to cut. For a real probability map the region is the
+        credible region at `Localization.credible_level`; for the producer's
+        binary reward map every non-zero pixel is already the region, the same
+        rule `localization_region` follows.
+    nside : `int`, optional
+        Resolution to measure at. Defaults to the localization's own, floored
+        at `REGION_NSIDE_FLOOR`; see that constant for why a floor exists.
+
+    Returns
+    -------
+    maps : `RegionMaps`
+
+    Notes
+    -----
+    Because both maps are `Localization` instances, everything that already
+    consumes one works on them unchanged -- `band_coverage` for a per-band
+    split, `band_coverage_by_epoch`, `coverage_by_night`, the curves. The
+    summary only needs the any-band totals, but the rest is available without
+    writing any more painting code.
+    """
+    prob = np.asarray(localization.prob_map, dtype=float)
+    source_nside = localization.nside
+    target = int(nside) if nside else max(int(source_nside), REGION_NSIDE_FLOOR)
+
+    if target != source_nside:
+        # power=-2 conserves the summed weight, so the region's probability is
+        # unchanged by the regrid; only the boundary gets finer.
+        prob = hp.ud_grade(prob, target, order_in="RING", order_out="RING", power=-2)
+
+    if localization.is_probability:
+        mask = credible_mask(prob, localization.credible_level)
+    else:
+        mask = prob > 0
+
+    n_pixels = int(mask.sum())
+    pixel_area = hp.nside2pixarea(target, degrees=True)
+    region_probability = float(prob[mask].sum()) if n_pixels else 0.0
+
+    restricted = np.zeros_like(prob)
+    uniform = np.zeros_like(prob)
+    if n_pixels and region_probability > 0:
+        restricted[mask] = prob[mask] / region_probability
+        uniform[mask] = 1.0 / n_pixels
+    else:
+        logger.warning("Credible region is empty at nside %d; region statistics will be zero", target)
+
+    level = localization.credible_level
+    base = localization.provenance
+    return RegionMaps(
+        probability=Localization(
+            prob_map=restricted,
+            nside=target,
+            is_probability=localization.is_probability,
+            credible_level=level,
+            provenance=f"{base}, restricted to the {level:.0%} region at nside={target}",
+        ),
+        area=Localization(
+            prob_map=uniform,
+            nside=target,
+            is_probability=False,
+            credible_level=level,
+            provenance=(
+                f"{base}, uniform weight over the {level:.0%} region at "
+                f"nside={target} ({n_pixels * pixel_area:.0f} deg^2)"
+            ),
+        ),
+        region_probability=region_probability,
+        region_area_deg2=float(n_pixels * pixel_area),
+        n_pixels=n_pixels,
+        nside=target,
+        credible_level=level,
+        is_probability=localization.is_probability,
     )

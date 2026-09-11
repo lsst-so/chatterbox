@@ -181,10 +181,16 @@ sim:
   # Resolution of the count maps. 256 is ~0.05 deg^2 per pixel, fine enough to
   # resolve the 1.75 deg field of view.
   nightly_plots_nside: 256
+  # Resolution the "within the 90% localization" probability and area
+  # statistics are measured at. 0 follows the skymap, floored at nside 512 so
+  # the field-of-view discs are not quantized into an optimistic area.
+  region_nside: 0
   # One figure of coverage gained per night, per band, with the running any-band
   # total drawn over it. Separate from nightly_plots: this is a single image
   # whatever the run length, and it covers every night, including the ones the
-  # cap above leaves out.
+  # cap above leaves out. A lower panel shows the observing time the follow-up
+  # took each night against everything observed that night, which is what says
+  # whether the coverage was worth its cost.
   nightly_coverage_plot: true
 
 paths:
