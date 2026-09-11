@@ -25,6 +25,7 @@ import healpy as hp
 import numpy as np
 import pandas as pd
 
+from ..astro.skymap import region_localizations
 from ..models import Localization
 
 __all__ = [
@@ -34,6 +35,8 @@ __all__ = [
     "CoverageComparison",
     "CoverageResult",
     "NightlyCoverage",
+    "RegionCoverage",
+    "region_coverage",
     "any_band_curve",
     "campaign_time",
     "compare_coverage",
@@ -836,6 +839,214 @@ def compare_coverage(
     )
     logger.info("Coverage (%s): %s", too.quantity, comparison.summary_line())
     return comparison
+
+
+@dataclass
+class RegionCoverage:
+    """What a campaign reached *inside* the credible region, both ways.
+
+    The per-band numbers elsewhere in this module are fractions of the
+    **whole** map: on a real probability skymap they include the tails outside
+    the contour, which is why an any-band figure above the credible level is
+    possible and not a bug. This is the other question -- of the 90% region
+    that follow-up is actually planned against, how much probability and how
+    much *sky* did the campaign get to.
+
+    Probability and area are separate quantities and neither substitutes for
+    the other: a campaign that covers the densest half of a region can hold
+    most of its probability while leaving most of its area unobserved.
+
+    Attributes
+    ----------
+    credible_level : `float`
+        Level the region encloses, e.g. 0.9.
+    nside : `float`
+        Resolution the statistics were measured at.
+    region_area_deg2 : `float`
+        Area of the credible region.
+    region_probability : `float`
+        Probability the region contains, marginally above `credible_level`
+        because the region is made of whole pixels. Converts the
+        region-relative probability below back to an all-sky one.
+    is_probability : `bool`
+        True when a real probability map was available. When False the
+        probability fields are meaningless and only the areas are reported.
+    too_probability, too_area : `float`
+        Fraction of the region's probability and of its area reached by the
+        ToO follow-up alone, 0-1.
+    combined_probability, combined_area : `float` or None
+        The same once nominal-cadence visits landing on the region are counted
+        too. None when no combined visit set was supplied.
+    too_n_visits, combined_n_visits : `int`
+        Visits behind each row.
+    """
+
+    credible_level: float
+    nside: int
+    region_area_deg2: float
+    region_probability: float
+    is_probability: bool
+    too_probability: float = 0.0
+    too_area: float = 0.0
+    combined_probability: float | None = None
+    combined_area: float | None = None
+    too_n_visits: int = 0
+    combined_n_visits: int = 0
+
+    @property
+    def too_area_deg2(self) -> float:
+        """Square degrees of the region the follow-up reached."""
+        return self.too_area * self.region_area_deg2
+
+    @property
+    def combined_area_deg2(self) -> float | None:
+        """Square degrees of the region reached once the survey is counted."""
+        if self.combined_area is None:
+            return None
+        return self.combined_area * self.region_area_deg2
+
+    @property
+    def too_probability_absolute(self) -> float:
+        """Follow-up probability as a fraction of the *whole* sky.
+
+        Directly comparable to `CoverageResult.any_band`, which is measured
+        the same way against the unrestricted map.
+        """
+        return self.too_probability * self.region_probability
+
+    @property
+    def combined_probability_absolute(self) -> float | None:
+        """`combined_probability` as a fraction of the whole sky."""
+        if self.combined_probability is None:
+            return None
+        return self.combined_probability * self.region_probability
+
+    def summary_line(self) -> str:
+        """One-line summary for the log."""
+        parts = [f"{self.credible_level:.0%} region {self.region_area_deg2:.0f} deg^2"]
+        if self.is_probability:
+            parts.append(f"ToO probability {100 * self.too_probability:.1f}%")
+        parts.append(f"ToO area {100 * self.too_area:.1f}%")
+        if self.combined_area is not None:
+            if self.is_probability and self.combined_probability is not None:
+                parts.append(f"+survey probability {100 * self.combined_probability:.1f}%")
+            parts.append(f"+survey area {100 * self.combined_area:.1f}%")
+        return ", ".join(parts)
+
+
+def _any_band_total(
+    visits: pd.DataFrame,
+    localization: Localization,
+    fov_radius_deg: float = FOV_RADIUS_DEG,
+    ra_col: str | None = None,
+    dec_col: str | None = None,
+    radians: bool | None = None,
+) -> float:
+    """Weight under a set of visits in one pass, ignoring which band they were.
+
+    `band_coverage` would do this too, but only alongside six per-band passes
+    this caller has no use for.
+    """
+    if visits.empty:
+        return 0.0
+    if ra_col is None or dec_col is None:
+        detected_ra, detected_dec, detected_radians = detect_pointing_columns(visits)
+        ra_col = ra_col or detected_ra
+        dec_col = dec_col or detected_dec
+        if radians is None:
+            radians = detected_radians
+    elif radians is None:
+        radians = True
+    ra, dec = _pointings(visits, ra_col, dec_col, radians)
+    total, _ = _accumulate(
+        np.asarray(localization.prob_map, dtype=float),
+        ra,
+        dec,
+        localization.nside,
+        np.radians(fov_radius_deg),
+    )
+    return float(total)
+
+
+def region_coverage(
+    follow_up: pd.DataFrame,
+    localization: Localization,
+    combined_visits: pd.DataFrame | None = None,
+    nside: int | None = None,
+    fov_radius_deg: float = FOV_RADIUS_DEG,
+    **kwargs,
+) -> RegionCoverage:
+    """Probability and area of the credible region a campaign covered.
+
+    Parameters
+    ----------
+    follow_up : `pandas.DataFrame`
+        ToO visits, i.e. the output of `too_visits`.
+    localization : `Localization`
+        Localization whose credible region is the denominator. With a real
+        probability map both statistics are reported; with the producer's
+        binary reward map there is no probability to integrate, so only the
+        area is meaningful and `RegionCoverage.is_probability` says so.
+    combined_visits : `pandas.DataFrame`, optional
+        Follow-up plus the nominal-cadence visits that land on the
+        localization -- pass `CoverageComparison.combined_visits`, so this row
+        cannot disagree with the all-sky row computed from the same set.
+    nside : `int`, optional
+        Resolution to measure at. Defaults to
+        `chatterbox.astro.skymap.region_localizations`'s own choice.
+    fov_radius_deg : `float`
+        Field-of-view radius painted around each pointing.
+    **kwargs
+        Pointing-column overrides, forwarded to the painting.
+
+    Returns
+    -------
+    coverage : `RegionCoverage`
+    """
+    maps = region_localizations(localization, nside=nside)
+    result = RegionCoverage(
+        credible_level=maps.credible_level,
+        nside=maps.nside,
+        region_area_deg2=maps.region_area_deg2,
+        region_probability=maps.region_probability,
+        is_probability=maps.is_probability,
+        too_n_visits=int(len(follow_up)),
+    )
+    if maps.n_pixels == 0:
+        logger.warning("Credible region is empty; no region statistics to report")
+        return result
+
+    result.too_area = _any_band_total(follow_up, maps.area, fov_radius_deg, **kwargs)
+    if maps.is_probability:
+        result.too_probability = _any_band_total(follow_up, maps.probability, fov_radius_deg, **kwargs)
+
+    if combined_visits is not None and not combined_visits.empty:
+        result.combined_n_visits = int(len(combined_visits))
+        result.combined_area = _any_band_total(combined_visits, maps.area, fov_radius_deg, **kwargs)
+        if maps.is_probability:
+            result.combined_probability = _any_band_total(
+                combined_visits, maps.probability, fov_radius_deg, **kwargs
+            )
+        # Painting is monotonic in the visit set, so the combined row can only
+        # be the larger one. It falling below the follow-up means the two were
+        # measured against different maps or different rows -- the same guard
+        # `compare_coverage` carries, and it has caught a real defect before.
+        for label, alone, both in (
+            ("probability", result.too_probability, result.combined_probability),
+            ("area", result.too_area, result.combined_area),
+        ):
+            if both is not None and both < alone - 1e-9:
+                logger.warning(
+                    "Combined %s coverage of the %.0f%% region (%.3f) is below the "
+                    "follow-up's own (%.3f), which should be impossible",
+                    label,
+                    100 * maps.credible_level,
+                    both,
+                    alone,
+                )
+
+    logger.info("Region coverage: %s", result.summary_line())
+    return result
 
 
 def campaign_time(

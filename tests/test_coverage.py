@@ -6,7 +6,12 @@ import pandas as pd
 import pytest
 from conftest import NSIDE, disc_reward_map
 
-from chatterbox.astro.skymap import localization_from_probability, localization_from_reward_map
+from chatterbox.astro.skymap import (
+    REGION_NSIDE_FLOOR,
+    localization_from_probability,
+    localization_from_reward_map,
+    region_localizations,
+)
 from chatterbox.sim.coverage import (
     BANDS,
     any_band_curve,
@@ -16,6 +21,7 @@ from chatterbox.sim.coverage import (
     compare_coverage,
     coverage_by_night,
     coverage_curve,
+    region_coverage,
     survey_visits,
     too_mask,
     too_visits,
@@ -730,3 +736,176 @@ def test_a_follow_up_visit_outside_the_contour_is_still_counted(caplog):
     assert comparison.combined.any_band >= comparison.too.any_band
     assert comparison.survey_gain["any"] >= 0.0
     assert "should be impossible" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Coverage of the credible region itself (issue #1)
+# ---------------------------------------------------------------------------
+
+
+def gaussian_localization(sigma_deg=2.0, nside=NSIDE_MAP, credible_level=0.9):
+    """A peaked map with tails everywhere, as a real BAYESTAR map has.
+
+    A *uniform* map is no good for these tests: `credible_mask` sorts pixels by
+    density, so on flat weight the 90% region it picks is an arbitrary
+    scattering of pixels rather than a region.
+    """
+    centre = hp.ang2vec(60.0, -35.0, lonlat=True)
+    vectors = np.array(hp.pix2vec(nside, np.arange(hp.nside2npix(nside))))
+    seps = np.degrees(np.arccos(np.clip(vectors.T @ centre, -1.0, 1.0)))
+    prob = np.exp(-0.5 * (seps / sigma_deg) ** 2)
+    return localization_from_probability(prob / prob.sum(), provenance="test", credible_level=credible_level)
+
+
+def test_the_region_is_the_credible_region_not_the_whole_map():
+    """The denominator is the 90% region, and it holds ~90% of the map."""
+    maps = region_localizations(gaussian_localization())
+    assert maps.region_probability == pytest.approx(0.9, abs=0.01)
+    assert maps.region_probability >= 0.9, "whole pixels, so never slightly under"
+    assert maps.probability.prob_map.sum() == pytest.approx(1.0), "renormalized to the region"
+    assert maps.area.prob_map.sum() == pytest.approx(1.0)
+    assert 0 < maps.region_area_deg2 < 41253.0
+
+
+def test_the_region_is_measured_at_the_resolution_floor():
+    """A coarse map is regridded up, and the regrid conserves the region."""
+    coarse = localization_from_reward_map(disc_reward_map(60.0, -35.0, 8.0), NSIDE)
+    maps = region_localizations(coarse)
+    assert maps.nside == REGION_NSIDE_FLOOR
+    expected = int(coarse.prob_map.astype(bool).sum()) * hp.nside2pixarea(NSIDE, degrees=True)
+    assert maps.region_area_deg2 == pytest.approx(expected, rel=1e-6)
+
+
+def test_probability_and_area_agree_when_the_density_is_uniform():
+    """The sanity check that the two numbers are the same measurement.
+
+    With flat weight inside the region, the fraction of its probability and
+    the fraction of its area under a set of visits are the same number, so any
+    disagreement would mean the two maps were painted differently.
+    """
+    prob = np.zeros(hp.nside2npix(NSIDE_MAP))
+    pixels = hp.query_disc(NSIDE_MAP, hp.ang2vec(60.0, -35.0, lonlat=True), np.radians(4.0), inclusive=True)
+    prob[pixels] = 1.0
+    # credible_level=1 so the region is the whole top hat rather than an
+    # arbitrary 90% of equally-likely pixels.
+    flat = localization_from_probability(prob, provenance="test", credible_level=1.0)
+
+    visits = make_visits([(59.0, -35.0), (61.5, -34.0)])
+    region = region_coverage(visits, flat)
+    assert region.too_area == pytest.approx(region.too_probability, rel=1e-9)
+    assert 0.05 < region.too_area < 0.95, "a partial cover, so the equality is not trivial"
+
+
+def test_a_pointing_on_the_peak_buys_more_probability_than_area():
+    """Why both numbers are reported rather than one standing for the other."""
+    localization = gaussian_localization()
+    region = region_coverage(make_visits([(60.0, -35.0)]), localization)
+    assert region.too_probability > region.too_area * 2
+    assert region.too_area < 0.35, "one field is a small part of a 90% region this size"
+
+
+def test_tiling_the_region_covers_all_of_it():
+    localization = gaussian_localization(sigma_deg=1.5)
+    grid = [
+        (60.0 + dx / np.cos(np.radians(35.0)), -35.0 + dy)
+        for dx in np.arange(-6.0, 6.01, 1.5)
+        for dy in np.arange(-6.0, 6.01, 1.5)
+    ]
+    region = region_coverage(make_visits(grid), localization)
+    assert region.too_probability == pytest.approx(1.0, abs=0.01)
+    assert region.too_area == pytest.approx(1.0, abs=0.01)
+
+
+def test_probability_outside_the_region_does_not_count():
+    """The distinction from the all-sky rows: tails are excluded here.
+
+    A visit far enough out to miss the 90% contour still collects weight from
+    a real map's tails, which is exactly what the all-sky number reports. The
+    region number must not.
+    """
+    localization = gaussian_localization()
+    outside = make_visits([(60.0, -25.0)])
+    assert band_coverage(outside, localization).any_band > 0, "tails, as the setup needs"
+
+    region = region_coverage(outside, localization)
+    assert region.too_probability == pytest.approx(0.0, abs=1e-9)
+    assert region.too_area == pytest.approx(0.0, abs=1e-9)
+
+
+def test_the_region_probability_converts_back_to_an_all_sky_fraction():
+    """`too_probability_absolute` is comparable to the all-sky row above it.
+
+    Measured at the same resolution, the only thing separating the two is the
+    probability the visits collected from outside the contour, so for fields
+    sitting on the peak they nearly agree. The map is built at the region
+    resolution here deliberately: at a coarser nside the all-sky pass paints
+    inflated discs and runs ahead of the region number by much more than the
+    tails accounts for, which is the effect
+    `test_a_coarse_map_overstates_the_covered_area` pins.
+    """
+    localization = gaussian_localization(nside=REGION_NSIDE_FLOOR)
+    visits = make_visits([(60.0, -35.0), (61.0, -36.0)])
+    region = region_coverage(visits, localization)
+    all_sky = band_coverage(visits, localization).any_band
+
+    assert region.nside == localization.nside, "no regrid, so like for like"
+    assert region.too_probability_absolute > 0
+    assert region.too_probability_absolute <= all_sky + 1e-9, "the region is part of the map"
+    assert region.too_probability_absolute == pytest.approx(all_sky, rel=0.05)
+
+
+def test_the_combined_row_is_never_below_the_follow_up(caplog):
+    localization = gaussian_localization()
+    follow_up = make_visits([(60.0, -35.0)])
+    survey = make_visits([(60.0, -38.0)], reason="pairs_gr_33")
+    combined = pd.concat([follow_up, survey], ignore_index=True)
+
+    with caplog.at_level("WARNING"):
+        region = region_coverage(follow_up, localization, combined_visits=combined)
+    assert region.combined_probability >= region.too_probability
+    assert region.combined_area > region.too_area, "the survey visit reached new sky"
+    assert region.combined_n_visits == 2
+    assert "should be impossible" not in caplog.text
+
+
+def test_the_reward_map_path_reports_area_only():
+    """No probability skymap means no probability number, not a fake one."""
+    localization = localization_from_reward_map(disc_reward_map(60.0, -35.0, 5.0), NSIDE)
+    region = region_coverage(make_visits([(60.0, -35.0)]), localization)
+
+    assert region.is_probability is False
+    assert region.too_probability == 0.0, "not measured, rather than measured as zero"
+    assert region.too_area > 0
+    assert region.credible_level == pytest.approx(0.7), "the producer's level, not 0.9"
+
+
+def test_a_coarse_map_overstates_the_covered_area():
+    """What the resolution floor is defending against.
+
+    `query_disc(inclusive=True)` keeps every pixel a field touches, so at the
+    reward map's own nside 32 -- 3.4 deg^2 per pixel against a 9.6 deg^2 field
+    -- the footprint inflates enough to flatter the strategy. The floor is the
+    fix; this pins the effect so the constant is not quietly lowered.
+    """
+    localization = localization_from_reward_map(disc_reward_map(60.0, -35.0, 8.0), NSIDE)
+    visits = make_visits([(60.0, -35.0), (62.0, -36.0)])
+
+    coarse = region_coverage(visits, localization, nside=NSIDE)
+    fine = region_coverage(visits, localization)
+
+    assert coarse.region_area_deg2 == pytest.approx(fine.region_area_deg2, rel=1e-6)
+    assert coarse.too_area > fine.too_area * 1.5
+    assert fine.too_area > 0
+
+
+def test_the_region_maps_work_with_the_per_band_machinery():
+    """The maps are ordinary localizations, so nothing else needs rewriting."""
+    maps = region_localizations(gaussian_localization())
+    visits = pd.concat(
+        [make_visits([(60.0, -35.0)], band="g"), make_visits([(61.0, -35.0)], band="r")],
+        ignore_index=True,
+    )
+    per_band = band_coverage(visits, maps.probability)
+    assert per_band.fractions["g"] > 0 and per_band.fractions["r"] > 0
+    assert per_band.any_band <= per_band.fractions["g"] + per_band.fractions["r"] + 1e-9
+    assert band_coverage(visits, maps.area).is_probability is False

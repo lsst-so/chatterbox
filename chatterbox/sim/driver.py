@@ -198,6 +198,7 @@ def run_job(job_dir: Path) -> dict[str, Any]:
         coverage_by_night,
         coverage_curve,
         nightly_visit_maps,
+        region_coverage,
         too_visits,
         visits_overlapping,
     )
@@ -379,8 +380,19 @@ def run_job(job_dir: Path) -> dict[str, Any]:
     if skymap_path and Path(skymap_path).is_file():
         from ligo.skymap.io import read_sky_map
 
+        from ..ingest.enrich_gracedb import WORKING_NSIDE
+
         prob, _ = read_sky_map(str(skymap_path), moc=False, nest=True)
-        prob = hp.reorder(np.asarray(prob, dtype=float), n2r=True)
+        prob = np.asarray(prob, dtype=float)
+        # The same resolution the alert path degrades to, for two reasons: a
+        # full-resolution BAYESTAR map is nside 1024-2048, i.e. 12-50M pixels
+        # that `band_coverage` copies once per band; and an area quoted here
+        # against a different nside than the one the alert quoted would not
+        # match it, since the region is built from whole pixels.
+        if hp.get_nside(prob) != WORKING_NSIDE:
+            prob = hp.ud_grade(prob, WORKING_NSIDE, order_in="NESTED", order_out="RING", power=-2)
+        else:
+            prob = hp.reorder(prob, n2r=True)
         localization = localization_from_probability(
             prob, provenance=f"GraceDB skymap for {source}", credible_level=0.9
         )
@@ -410,6 +422,37 @@ def run_job(job_dir: Path) -> dict[str, Any]:
     result["any_band_combined"] = comparison.combined.any_band
     result["survey_gain"] = comparison.survey_gain
     result["survey_visits_on_localization"] = comparison.survey_n_visits
+
+    # ------------------------------------------------- credible-region stats
+
+    # The numbers above are fractions of the whole map, tails included. These
+    # are the same campaign measured inside the credible region the follow-up
+    # is planned against, and separately in probability and in area -- one
+    # does not imply the other, since covering the densest part of a region
+    # buys most of its probability while leaving most of its sky untouched.
+    try:
+        region_nside = int(sim_cfg.get("region_nside", 0)) or None
+        region = region_coverage(
+            follow_up,
+            localization,
+            combined_visits=comparison.combined_visits,
+            nside=region_nside,
+        )
+        result["region_coverage"] = {
+            "credible_level": region.credible_level,
+            "nside": region.nside,
+            "region_area_deg2": region.region_area_deg2,
+            "region_probability": region.region_probability,
+            "is_probability": region.is_probability,
+            "too_probability": region.too_probability,
+            "too_area": region.too_area,
+            "combined_probability": region.combined_probability,
+            "combined_area": region.combined_area,
+            "too_n_visits": region.too_n_visits,
+            "combined_n_visits": region.combined_n_visits,
+        }
+    except Exception as exc:
+        logger.warning("Could not measure coverage of the credible region: %s", exc)
 
     # ---------------------------------------------------------- campaign time
 

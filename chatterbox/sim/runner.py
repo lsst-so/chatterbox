@@ -181,6 +181,11 @@ class SimResult:
     #: Observing time the campaign consumed; see
     #: `chatterbox.sim.coverage.CampaignTime` for the keys.
     campaign_time: dict[str, Any] = field(default_factory=dict)
+    #: Coverage of the credible region itself -- probability and area, each as
+    #: a fraction of that region rather than of the whole map. See
+    #: `chatterbox.sim.coverage.RegionCoverage` for the keys. Empty for a
+    #: result produced before this was measured.
+    region_coverage: dict[str, Any] = field(default_factory=dict)
     #: "probability" or "area" -- whether coverage is a real probability.
     quantity: str = "area"
     #: Visits the simulation itself scheduled.
@@ -234,6 +239,17 @@ class SimResult:
     def is_probability_result(self) -> bool:
         """True when `coverage` holds probabilities, not area fractions."""
         return self.quantity == "probability"
+
+    def has_region_coverage(self) -> bool:
+        """True when the credible-region statistics are available.
+
+        Older results predate them, and a run whose region came out empty
+        reports nothing rather than a row of zeros.
+        """
+        region = self.region_coverage
+        if not region:
+            return False
+        return float(region.get("region_area_deg2", 0.0)) > 0.0
 
     def has_combined_coverage(self) -> bool:
         """True when the ToO-plus-survey comparison is available.

@@ -12,7 +12,7 @@ from chatterbox.astro.skymap import localization_from_probability, localization_
 from chatterbox.plots.style import localization_extent, localization_levels, sky_projection
 from chatterbox.sim.coverage import nightly_visit_maps, visits_overlapping
 from chatterbox.sim.runner import SimResult
-from chatterbox.slackbot.blocks import build_sim_figures_blocks
+from chatterbox.slackbot.blocks import build_sim_figures_blocks, build_sim_reply_blocks
 from chatterbox.slackbot.client import PostedMessage, render_blocks_as_text
 
 NSIDE = 128
@@ -412,6 +412,19 @@ def sim_result(**overrides):
             "by_band": {"g": 1200.0, "i": 1080.0},
             "by_epoch": {"0": 1200.0, "1": 1080.0},
             "measure": "visittime + slewtime",
+        },
+        region_coverage={
+            "credible_level": 0.9,
+            "nside": 512,
+            "region_area_deg2": 412.0,
+            "region_probability": 0.901,
+            "is_probability": True,
+            "too_probability": 0.914,
+            "too_area": 0.782,
+            "combined_probability": 0.978,
+            "combined_area": 0.941,
+            "too_n_visits": 1972,
+            "combined_n_visits": 2356,
         },
     )
     defaults.update(overrides)
@@ -992,14 +1005,19 @@ def test_the_reply_explains_why_the_two_do_not_sum(config):
 
 def test_an_older_result_still_reports_the_too_numbers(config):
     """result.json from before the comparison existed must not show zeros."""
-    from chatterbox.slackbot.blocks import build_sim_reply_blocks
-
-    result = sim_result(coverage_combined={}, any_band_combined=0.0, survey_gain={}, campaign_time={})
+    result = sim_result(
+        coverage_combined={},
+        any_band_combined=0.0,
+        survey_gain={},
+        campaign_time={},
+        region_coverage={},
+    )
     assert result.has_combined_coverage() is False
     text = render_blocks_as_text(build_sim_reply_blocks(result, config))
     assert "ToO follow-up only" in text
     assert "+ nominal survey" not in text
     assert "Campaign cost" not in text
+    assert "Within the" not in text
 
 
 def test_the_reply_reports_what_the_campaign_cost(config):
@@ -1077,3 +1095,77 @@ def test_a_run_with_no_timing_renders_unchanged(tmp_path):
         nightly, localization, tmp_path / "empty_timing.png", source="S1", timing=CampaignTime()
     )
     assert path is not None and path.is_file()
+
+
+# ---------------------------------------------------------------------------
+# Coverage of the credible region in the reply text (issue #1)
+# ---------------------------------------------------------------------------
+
+
+def test_reply_reports_probability_and_area_within_the_region(config):
+    """Issue #1: both statistics, inside the 90% localization."""
+    text = render_blocks_as_text(build_sim_reply_blocks(sim_result(), config))
+    assert "*Within the 90% localization* (412 deg^2)" in text
+    assert "probability *91.4%*" in text
+    assert "area 78.2% (322 deg^2)" in text, "the fraction and the sky it stands for"
+    assert "probability *97.8%*" in text
+    assert "area 94.1% (388 deg^2)" in text
+
+
+def test_reply_separates_the_region_from_the_whole_map(config):
+    """Two percentages for 'coverage' must not read as contradicting.
+
+    The band rows integrate the entire map, tails included, so they can sit
+    above the credible level; the region rows are fractions of the 90% region.
+    """
+    text = render_blocks_as_text(build_sim_reply_blocks(sim_result(), config))
+    assert "the whole map, tails included" in text
+    assert text.index("per band") < text.index("Within the 90% localization")
+
+
+def test_reply_without_region_statistics_still_renders(config):
+    """Results from before this was measured must not lose their reply."""
+    text = render_blocks_as_text(build_sim_reply_blocks(sim_result(region_coverage={}), config))
+    assert "Within the" not in text
+    assert "any band" in text, "the rest of the reply is unaffected"
+
+
+def test_reply_reports_area_only_without_a_probability_skymap(config):
+    """No skymap means no probability number, and the reason is stated."""
+    result = sim_result(
+        quantity="area",
+        region_coverage={
+            "credible_level": 0.7,
+            "nside": 512,
+            "region_area_deg2": 205.0,
+            "region_probability": 1.0,
+            "is_probability": False,
+            "too_probability": 0.0,
+            "too_area": 0.64,
+            "combined_probability": None,
+            "combined_area": 0.71,
+            "too_n_visits": 40,
+            "combined_n_visits": 55,
+        },
+    )
+    text = render_blocks_as_text(build_sim_reply_blocks(result, config))
+    assert "*Within the 70% localization* (205 deg^2)" in text
+    region_text = text.split("Within the 70%")[1].split("Campaign cost")[0]
+    assert "probability *" not in region_text, "no number, only the reason there is none"
+    assert "area 64.0% (131 deg^2)" in text
+    assert "only the area is measurable" in text
+
+
+def test_an_empty_region_reports_nothing_rather_than_zeros(config):
+    """A degenerate region would otherwise post a row of confident zeros."""
+    result = sim_result(
+        region_coverage={
+            "credible_level": 0.9,
+            "region_area_deg2": 0.0,
+            "is_probability": True,
+            "too_probability": 0.0,
+            "too_area": 0.0,
+        }
+    )
+    assert result.has_region_coverage() is False
+    assert "Within the" not in render_blocks_as_text(build_sim_reply_blocks(result, config))

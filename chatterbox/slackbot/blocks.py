@@ -443,6 +443,51 @@ def _campaign_line(result: SimResult) -> str:
     return line
 
 
+def _region_lines(result: SimResult) -> list[str]:
+    """Coverage of the credible region itself: probability and area.
+
+    This is issue #1's question, and it is a different one from the rows
+    above. Those are fractions of the whole map -- on a real skymap the tails
+    outside the contour are included, which is why an any-band figure can
+    exceed the credible level. These are fractions of the 90% region the
+    follow-up is actually planned against, and probability and area are
+    reported separately because neither implies the other: covering the
+    densest part of a region buys most of its probability while leaving most
+    of its sky unobserved.
+    """
+    region = result.region_coverage or {}
+    if not result.has_region_coverage():
+        return []
+    level = 100 * float(region.get("credible_level", 0.9))
+    area = float(region.get("region_area_deg2", 0.0))
+    is_probability = bool(region.get("is_probability", False))
+
+    def row(label: str, prob, frac) -> str:
+        covered = float(frac or 0.0)
+        cells = []
+        if is_probability and prob is not None:
+            cells.append(f"probability *{100 * float(prob):.1f}%*")
+        cells.append(f"area {100 * covered:.1f}% ({covered * area:,.0f} deg^2)")
+        return f"*{label}*  " + "  |  ".join(cells)
+
+    lines = [f"*Within the {level:.0f}% localization* ({area:,.0f} deg^2)"]
+    lines.append(row("ToO follow-up only", region.get("too_probability"), region.get("too_area")))
+    if region.get("combined_area") is not None:
+        lines.append(
+            row(
+                "+ nominal survey",
+                region.get("combined_probability"),
+                region.get("combined_area"),
+            )
+        )
+    if not is_probability:
+        lines.append(
+            f"_No probability skymap, so only the area is measurable; the region is the "
+            f"producer's {level:.0f}% reward map._"
+        )
+    return lines
+
+
 def build_sim_reply_blocks(result: SimResult, config: Config) -> list[dict[str, Any]]:
     """Build the threaded reply carrying simulation results.
 
@@ -470,7 +515,8 @@ def build_sim_reply_blocks(result: SimResult, config: Config) -> list[dict[str, 
     lines = [
         f":telescope: *Simulated {result.nights}-night follow-up of {result.source}* "
         f"(`{result.alert_type}`)",
-        f"Expected fraction of localization {quantity} covered, per band:",
+        f"Expected fraction of total localization {quantity} covered, per band "
+        f"(the whole map, tails included):",
     ]
     # Two rows, labelled: the ToO strategy on its own, and what the
     # localization actually receives once nominal-cadence visits landing on it
@@ -493,6 +539,7 @@ def build_sim_reply_blocks(result: SimResult, config: Config) -> list[dict[str, 
         f"{result.too_visits:,} ToO visits out of {result.total_visits:,} total; "
         f"ran in {result.runtime_s / 60.0:.1f} min."
     )
+    lines.extend(_region_lines(result))
     campaign = _campaign_line(result)
     if campaign:
         lines.append(campaign)
