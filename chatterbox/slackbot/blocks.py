@@ -25,6 +25,7 @@ from ..sim.runner import SimResult
 
 __all__ = [
     "build_trigger_blocks",
+    "build_airmass_animation_blocks",
     "crew_blocks",
     "build_sim_reply_blocks",
     "build_sim_figures_blocks",
@@ -651,6 +652,46 @@ def _region_lines(result: SimResult) -> list[str]:
             f"producer's {level:.0f}% reward map._"
         )
     return lines
+
+
+def build_airmass_animation_blocks(
+    trigger: Trigger,
+    events: NightEvents,
+    mask_above: float,
+    sun_alt_limit_deg: float = -12.0,
+) -> list[dict[str, Any]]:
+    """The caption posted with the animated airmass map.
+
+    Parameters
+    ----------
+    trigger : `Trigger`
+        The alert, for what the contour is.
+    events : `NightEvents`
+        The night animated.
+    mask_above : `float`
+        Airmass above which the map is masked, stated so the grey is not a
+        mystery.
+    sun_alt_limit_deg : `float`
+        Sun altitude bounding the animated window.
+
+    Returns
+    -------
+    blocks : `list` [`dict`]
+    """
+    start, end = events.observing_window(sun_alt_limit_deg)
+    from astropy.time import Time
+
+    first, last = Time(start, format="mjd", scale="utc"), Time(end, format="mjd", scale="utc")
+    loc = trigger.localization
+    return [
+        _section(
+            f":movie_camera: *Airmass through the first night* ({events.day_obs})\n"
+            f"Each frame is the airmass of the whole sky at one moment, from {_clock(first)} to "
+            f"{_clock(last)} (Sun below {sun_alt_limit_deg:g} deg; UTC, Chile local in brackets). "
+            f"The red contour is the {loc.credible_level:.0%} {loc.quantity_name}-weighted "
+            f"localization. Grey is below the horizon or above airmass {mask_above:g}."
+        )
+    ]
 
 
 def build_sim_reply_blocks(result: SimResult, config: Config) -> list[dict[str, Any]]:

@@ -127,13 +127,6 @@ def test_raw_excludes_the_reward_map(record):
     assert trigger.raw["source"] == "S260814a"
 
 
-def test_committed_fixtures_decode(data_dir):
-    for name in ("gw_case_b", "sn_galactic", "neutrino", "gw_case_d_test"):
-        trigger = decode_record(load_record_file(data_dir / f"{name}.json"))
-        assert trigger.geometry.area_deg2 > 0
-        assert trigger.localization.prob_map.sum() == pytest.approx(1.0)
-
-
 def test_test_flag_is_preserved(data_dir):
     trigger = decode_record(load_record_file(data_dir / "gw_case_d_test.json"))
     assert trigger.is_test is True

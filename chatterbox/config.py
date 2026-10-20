@@ -23,6 +23,7 @@ __all__ = [
     "Config",
     "SlackConfig",
     "CrewConfig",
+    "AirmassAnimationConfig",
     "IngestConfig",
     "DarkHoursConfig",
     "TemplateConfig",
@@ -159,6 +160,25 @@ class SlackConfig:
     mention: list[str] = field(default_factory=list)
     #: The shift crew the post tells to act; see `CrewConfig`.
     crew: CrewConfig = field(default_factory=CrewConfig)
+
+
+@dataclass
+class AirmassAnimationConfig:
+    """The animated airmass map posted under each alert.
+
+    It is posted in the alert's thread after the first post, not with it: a
+    night is dozens of frames and takes tens of seconds, which the first post
+    cannot afford.
+    """
+
+    enabled: bool = True
+    #: Airmass above which the map is masked to NaN rather than coloured.
+    mask_above: float = 3.8
+    #: Minutes between frames. 10 gives about 70 frames for a winter night.
+    step_minutes: float = 10.0
+    fps: int = 8
+    #: Frame resolution; a GIF this size stays under a few MB.
+    dpi: int = 80
 
 
 @dataclass
@@ -392,6 +412,7 @@ class Config:
     slack: SlackConfig = field(default_factory=SlackConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
     dark_hours: DarkHoursConfig = field(default_factory=DarkHoursConfig)
+    airmass_animation: AirmassAnimationConfig = field(default_factory=AirmassAnimationConfig)
     templates: TemplateConfig = field(default_factory=TemplateConfig)
     enrich: EnrichConfig = field(default_factory=EnrichConfig)
     sim: SimConfig = field(default_factory=SimConfig)

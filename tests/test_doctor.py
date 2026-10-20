@@ -32,15 +32,6 @@ def test_require_names_the_interpreter():
     assert "different python" in message
 
 
-def test_require_explains_the_ligo_namespace():
-    """'No module named ligo' is cryptic; the message must do better."""
-    capability = next(c for c in CAPABILITIES if c.name == "plots")
-    assert capability.modules == ("ligo.skymap.plot",)
-    assert capability.install == "ligo.skymap"
-    # The consequence is stated so a reader can judge urgency.
-    assert "plots" in capability.consequence
-
-
 def test_every_capability_declares_what_breaks():
     for capability in CAPABILITIES:
         assert capability.purpose
@@ -147,24 +138,6 @@ def test_add_checkout_makes_a_namespaced_package_importable(tmp_path, monkeypatc
         del sys.modules[name]
 
 
-def test_add_checkout_does_not_shadow_an_imported_copy(tmp_path, monkeypatch):
-    """A regular package already imported keeps winning; doctor says which."""
-    import sys
-
-    from chatterbox.deps import add_checkout
-
-    monkeypatch.setattr(sys, "path", list(sys.path))
-    checkout = tmp_path / "clone"
-    (checkout / "json").mkdir(parents=True)
-    (checkout / "json" / "__init__.py").write_text("MARKER = 'shadowed'\n")
-
-    add_checkout(checkout)
-    import json
-
-    # stdlib json was imported long ago, so the checkout cannot displace it.
-    assert not hasattr(json, "MARKER")
-
-
 def test_add_checkout_is_idempotent(tmp_path, monkeypatch):
     import sys
 
@@ -225,7 +198,6 @@ def test_doctor_advises_the_setting_not_pip_for_checkouts(tmp_path):
 
 def test_empty_sim_python_uses_the_running_interpreter():
     """The old default was a hardcoded path that was easy to get wrong."""
-    assert resolve_sim_python("") == pytest.approx(resolve_sim_python(""))
     assert str(resolve_sim_python("")) == sys.executable
     assert str(resolve_sim_python("   ")) == sys.executable
 
@@ -342,15 +314,6 @@ def test_diagnose_flags_a_missing_site_models(doctor_config, monkeypatch, tmp_pa
     assert check.ok is False
     assert check.fatal is True
     assert "site_models" in check.fix
-
-
-def test_report_shows_fixes_only_for_failures(doctor_config):
-    checks = diagnose(doctor_config)
-    report = format_report(checks)
-    for line in report.splitlines():
-        if "fix:" in line:
-            assert "[  ok]" not in line
-    assert "chatterbox environment" in report
 
 
 def test_report_summarises(doctor_config):

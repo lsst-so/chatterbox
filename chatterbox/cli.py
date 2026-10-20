@@ -51,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_serve = sub.add_parser("serve", help="Consume the configured alert source")
     p_serve.add_argument("--no-sim", action="store_true", help="Do not launch simulations")
+    p_serve.add_argument("--no-animation", action="store_true", help="Do not post the animated airmass map")
     p_serve.add_argument(
         "--lookback",
         type=float,
@@ -79,6 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Render and print the message without posting to Slack",
     )
     p_replay.add_argument("--no-sim", action="store_true", help="Do not launch a simulation")
+    p_replay.add_argument(
+        "--no-animation", action="store_true", help="Do not render and post the animated airmass map"
+    )
     p_replay.add_argument(
         "--sim-wait",
         action="store_true",
@@ -193,7 +197,9 @@ def _cmd_serve(args: argparse.Namespace, config: Config) -> int:
         return 2
 
     try:
-        handled = run_service(config, run_sim=not args.no_sim, lookback_s=lookback)
+        handled = run_service(
+            config, run_sim=not args.no_sim, run_animation=not args.no_animation, lookback_s=lookback
+        )
     except Exception as exc:
         # run_service has already posted this to the channel; the operator gets
         # one line and a non-zero exit, not a traceback, since the traceback is
@@ -224,6 +230,7 @@ def _cmd_replay(args: argparse.Namespace, config: Config) -> int:
                 poster=poster,
                 post=not args.dry_run,
                 run_sim=not args.no_sim,
+                run_animation=not args.no_animation,
                 sim_wait=args.sim_wait,
                 out_dir=out_dir,
             )
@@ -242,7 +249,7 @@ def _cmd_replay(args: argparse.Namespace, config: Config) -> int:
             print(f"  warning: {warning}")
         if report.posted is not None and report.posted.offline:
             print("  (offline: payload written instead of posted)")
-        if report.sim_thread is not None:
+        if report.has_background_work:
             pending.append(report)
 
     # Exiting here would abandon the simulations: they run detached and
@@ -250,6 +257,11 @@ def _cmd_replay(args: argparse.Namespace, config: Config) -> int:
     # ends up with figures on disk and nothing in Slack.
     for report in pending:
         job_dir = getattr(report.sim_job, "job_dir", "")
+        if report.sim_thread is None:
+            # Only the animation is outstanding: there is no job to name.
+            print(f"\nWaiting for the airmass animation of {report.trigger.source} to be posted.")
+            report.wait_for_simulation(timeout=config.sim.timeout_s)
+            continue
         print(
             f"\nWaiting for the simulation of {report.trigger.source} to finish so its "
             f"results can be posted. Ctrl-C leaves it running; post it afterwards with:\n"

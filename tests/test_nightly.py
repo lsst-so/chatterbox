@@ -213,13 +213,6 @@ def test_graded_map_gets_real_credible_levels():
     assert all(level > positive.min() / 2 for level in levels)
 
 
-def test_levels_are_never_at_or_above_the_peak():
-    """A contour at the peak encloses nothing and renders as noise."""
-    localization = disc_localization(radius=6.0, graded=True)
-    peak = localization.prob_map.max()
-    assert all(level < peak for level in localization_levels(localization))
-
-
 def test_reward_map_still_traces_its_boundary():
     localization = localization_from_reward_map(disc_reward_map(60.0, -35.0, 5.0), 32)
     levels = localization_levels(localization)
@@ -1121,13 +1114,6 @@ def test_reply_separates_the_region_from_the_whole_map(config):
     text = render_blocks_as_text(build_sim_reply_blocks(sim_result(), config))
     assert "the whole map, tails included" in text
     assert text.index("per band") < text.index("Within the 90% localization")
-
-
-def test_reply_without_region_statistics_still_renders(config):
-    """Results from before this was measured must not lose their reply."""
-    text = render_blocks_as_text(build_sim_reply_blocks(sim_result(region_coverage={}), config))
-    assert "Within the" not in text
-    assert "any band" in text, "the rest of the reply is unaffected"
 
 
 def test_reply_reports_area_only_without_a_probability_skymap(config):

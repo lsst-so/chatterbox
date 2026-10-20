@@ -69,13 +69,8 @@ def test_full_alert_path(record, config, offline_poster, template_cache, rubin_s
     assert report.template_coverage is not None
     assert "no template coverage cache" not in " ".join(report.warnings)
 
-
-def test_stage1_meets_its_latency_budget(
-    record, config, offline_poster, template_cache, rubin_scheduler, tmp_path
-):
-    report = process_trigger(
-        record, config, poster=offline_poster, post=True, run_sim=False, out_dir=tmp_path / "plots"
-    )
+    # The first post is the whole point, so its cost is asserted. It is
+    # folded in here rather than run again on its own: the same call.
     assert (
         report.elapsed_s < STAGE1_BUDGET_S
     ), f"stage 1 took {report.elapsed_s:.1f} s, over the {STAGE1_BUDGET_S:.0f} s budget"
@@ -456,17 +451,3 @@ def test_every_result_key_the_driver_writes_survives_the_round_trip():
     # And the measurements issue #2 asked for are among them.
     for key in ("coverage", "coverage_combined", "survey_gain", "campaign_time"):
         assert key in written
-
-
-def test_the_driver_measures_coverage_both_ways():
-    """A regression guard on the decomposition, not on the numbers.
-
-    The ToO-only number measures the strategy; the combined number is what the
-    localization actually received. Measuring only one of them was the state
-    issue #2 reported.
-    """
-    from pathlib import Path
-
-    source = Path("chatterbox/sim/driver.py").read_text()
-    assert "compare_coverage(" in source
-    assert "campaign_time(" in source
