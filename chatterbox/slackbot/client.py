@@ -58,6 +58,7 @@ class SlackPoster:
             else Path(config.paths.work_dir).expanduser() / "posts"
         )
         self._client = None
+        self._crew_ids: dict[str, str] | None = None
         self._token = None if dry_run else config.slack_token
         if self._token is None and not dry_run:
             logger.warning(
@@ -79,6 +80,57 @@ class SlackPoster:
                 raise ImportError("Posting to Slack requires slack-sdk (pip install slack-sdk)") from exc
             self._client = WebClient(token=self._token)
         return self._client
+
+    def crew_ids(self) -> dict[str, str] | None:
+        """Slack user group IDs for the shift crew, by handle.
+
+        A mention only notifies when it carries the group's ID, and the
+        configuration names groups by the handle people actually type. IDs
+        given in ``slack.crew.ids`` are used as they are; the rest are looked
+        up once with ``usergroups.list`` and kept for the life of the poster,
+        so only the first alert pays for the call.
+
+        Returns
+        -------
+        ids : `dict` [`str`, `str`] or None
+            Handle to group ID. A group that could not be resolved is simply
+            absent, which `chatterbox.slackbot.blocks.crew_blocks` reports in
+            the post rather than letting an untagged message look tagged.
+            None when nothing could be looked up because the poster is
+            offline: the answer is then unknown rather than "no such group",
+            and a dry run must not claim the real post would not notify.
+
+        Notes
+        -----
+        Never raises: failing to find a group must not cost the alert.
+        """
+        if self._crew_ids is not None:
+            return self._crew_ids
+
+        crew = self.config.slack.crew
+        ids = {h: i for h, i in crew.ids.items() if i}
+        missing = [h for h in crew.handles() if h not in ids]
+        if crew.enabled and missing and self.offline:
+            return None
+        if crew.enabled and missing:
+            try:
+                response = self._get_client().usergroups_list()
+                by_handle = {g.get("handle"): g.get("id") for g in response.get("usergroups", [])}
+                for handle in missing:
+                    if by_handle.get(handle):
+                        ids[handle] = by_handle[handle]
+            except Exception as exc:
+                logger.error(
+                    "Could not look up the user groups %s (%s); the post will not notify them. "
+                    "Give the bot the usergroups:read scope or set slack.crew.ids.",
+                    ", ".join(missing),
+                    exc,
+                )
+            still = [h for h in missing if h not in ids]
+            if still:
+                logger.warning("No Slack user group found for handle(s): %s", ", ".join(still))
+        self._crew_ids = ids
+        return ids
 
     def channel_for(self, is_test: bool) -> str:
         """Channel a message should go to.

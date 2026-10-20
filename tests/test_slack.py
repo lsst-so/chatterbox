@@ -361,3 +361,191 @@ def test_mention_is_suppressed_for_test_alerts(config, tmp_path):
     poster.post([{"type": "divider"}], "alert", is_test=True, label="test")
     payload = json.loads((tmp_path / "test.json").read_text())
     assert not payload["text"].startswith("<!subteam")
+
+
+# ---------------------------------------------------------------------------
+# Tagging the shift crew (issue #6)
+# ---------------------------------------------------------------------------
+
+CREW_IDS = {"summit-sup-sci": "S0LEAD", "os-day-shift": "S0DAY", "os-night-shift": "S0NIGHT"}
+
+
+def fresh_trigger(record, **changes):
+    """A trigger received a minute after its event, so it is not stale."""
+    from astropy.time import TimeDelta
+
+    record = {**record, **changes}
+    event = decode_record(record).event_time
+    return decode_record(record, received_at=event + TimeDelta(60.0, format="sec"))
+
+
+def crew_text(trigger, config, ids=CREW_IDS) -> str:
+    from chatterbox.slackbot.blocks import crew_blocks
+
+    return block_text(crew_blocks(trigger, config, ids))
+
+
+def test_a_real_alert_tags_all_three_groups(record, config):
+    text = crew_text(fresh_trigger(record), config)
+    for group_id in CREW_IDS.values():
+        assert f"<!subteam^{group_id}>" in text
+
+
+def test_the_lead_is_told_they_decide(record, config):
+    """Issue #6: the support scientist has authority over the event."""
+    text = crew_text(fresh_trigger(record), config)
+    lead_line = next(line for line in text.splitlines() if "S0LEAD" in line)
+    assert "summit support scientist" in lead_line
+    assert "authority to make decisions" in lead_line
+    assert "S0DAY" not in lead_line and "S0NIGHT" not in lead_line
+
+
+def test_the_observing_specialists_are_told_to_wait_for_the_lead(record, config):
+    text = crew_text(fresh_trigger(record), config)
+    notify_line = next(line for line in text.splitlines() if "S0DAY" in line)
+    assert "S0NIGHT" in notify_line, "both shifts addressed together"
+    assert "be aware" in notify_line
+    assert "as soon as possible" in notify_line
+    assert "await further instructions" in notify_line
+    assert "S0LEAD" not in notify_line
+
+
+def test_every_group_is_tagged_once(record, config):
+    config.slack.crew.notify = ["os-day-shift", "summit-sup-sci", "os-night-shift"]
+    text = crew_text(fresh_trigger(record), config)
+    assert text.count("S0LEAD") == 1, "the lead is not also told to wait for themselves"
+
+
+def test_the_crew_comes_straight_after_the_header(config, record, rubin_scheduler):
+    """It is the part of the post somebody has to act on."""
+    from chatterbox.astro.almanac import night_events
+    from chatterbox.astro.darkhours import dark_hours_map
+    from chatterbox.plots.darkhours import region_hours_summary
+
+    trigger = fresh_trigger(record)
+    events = night_events(when=trigger.event_time)
+    dark = dark_hours_map(events, nside=32, step_minutes=10.0)
+    stats = region_hours_summary(dark, trigger.localization)
+    blocks = build_trigger_blocks(trigger, events, dark, stats, None, config, CREW_IDS)
+    # The header is two blocks -- title, then source and timing -- and the
+    # crew is the very next one, ahead of the divider and everything else.
+    assert blocks[0]["type"] == "header"
+    assert trigger.source in blocks[1]["text"]["text"]
+    assert "S0LEAD" in blocks[2]["text"]["text"]
+    assert len(blocks) <= 50
+
+
+def test_a_test_alert_tags_nobody_and_says_so(record, config):
+    trigger = fresh_trigger(record, is_test=True)
+    text = crew_text(trigger, config)
+    assert "<!subteam" not in text
+    assert "shift was not tagged" in text
+    assert "@summit-sup-sci" in text, "plain text, which pings nobody"
+
+
+def test_an_old_event_tags_nobody_and_says_so(record, config):
+    """A replay of an archived alert must not page the shift."""
+    stale = decode_record(record)  # received now; the fixture event is from the past
+    assert stale.age_s > 24 * 3600
+    text = crew_text(stale, config)
+    assert "<!subteam" not in text
+    assert "old, so the shift was not tagged" in text
+
+
+def test_the_age_limit_can_be_switched_off(record, config):
+    config.slack.crew.max_age_hours = 0
+    assert "<!subteam^S0LEAD>" in crew_text(decode_record(record), config)
+
+
+def test_an_event_of_unknown_age_is_still_tagged(record, config):
+    """When the age cannot be told, failing to tag is the worse error."""
+    trigger = fresh_trigger(record)
+    trigger.event_time = None
+    assert "<!subteam^S0LEAD>" in crew_text(trigger, config)
+
+
+def test_a_group_without_an_id_is_written_as_text_and_flagged(record, config):
+    """A handle typed as text pings nobody; the post must not look tagged."""
+    text = crew_text(fresh_trigger(record), config, ids={"summit-sup-sci": "S0LEAD"})
+    assert "<!subteam^S0LEAD>" in text
+    assert "@os-day-shift" in text and "<!subteam^S0DAY>" not in text
+    assert "Not notified" in text
+    assert "@os-day-shift, @os-night-shift" in text.split("Not notified")[1]
+
+
+def test_a_dry_run_does_not_claim_the_post_would_not_notify(record, config):
+    """ids=None means 'not looked up', which is not 'not found'."""
+    from chatterbox.slackbot.blocks import crew_blocks
+
+    text = block_text(crew_blocks(fresh_trigger(record), config, None))
+    assert "@summit-sup-sci" in text
+    assert "Not notified" not in text
+
+
+def test_the_crew_can_be_switched_off(record, config):
+    from chatterbox.slackbot.blocks import crew_blocks
+
+    config.slack.crew.enabled = False
+    assert crew_blocks(fresh_trigger(record), config, CREW_IDS) == []
+
+
+def test_ids_from_the_config_are_used_without_asking_slack(config, tmp_path):
+    config.slack.crew.ids = dict(CREW_IDS)
+    poster = SlackPoster(config, dry_run=True, output_dir=tmp_path)
+    assert poster.crew_ids() == CREW_IDS
+
+
+def test_handles_are_resolved_through_usergroups_list(config, tmp_path, monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def usergroups_list(self):
+            calls.append(1)
+            return {
+                "usergroups": [
+                    {"handle": "summit-sup-sci", "id": "S0LEAD"},
+                    {"handle": "os-day-shift", "id": "S0DAY"},
+                    {"handle": "os-night-shift", "id": "S0NIGHT"},
+                    {"handle": "unrelated", "id": "S0OTHER"},
+                ]
+            }
+
+    monkeypatch.setenv(config.slack.bot_token_env, "xoxb-test")
+    poster = SlackPoster(config, output_dir=tmp_path)
+    monkeypatch.setattr(poster, "_get_client", lambda: FakeClient())
+
+    assert poster.crew_ids() == CREW_IDS
+    assert poster.crew_ids() == CREW_IDS
+    assert len(calls) == 1, "looked up once, not once per alert"
+
+
+def test_a_failed_lookup_loses_the_tag_and_not_the_alert(config, tmp_path, monkeypatch, caplog):
+    class Refusing:
+        def usergroups_list(self):
+            raise RuntimeError("missing_scope")
+
+    monkeypatch.setenv(config.slack.bot_token_env, "xoxb-test")
+    config.slack.crew.ids = {"summit-sup-sci": "S0LEAD"}
+    poster = SlackPoster(config, output_dir=tmp_path)
+    monkeypatch.setattr(poster, "_get_client", lambda: Refusing())
+
+    with caplog.at_level("ERROR"):
+        ids = poster.crew_ids()
+    assert ids == {"summit-sup-sci": "S0LEAD"}, "what is known survives"
+    assert "usergroups:read" in caplog.text
+
+
+def test_an_offline_poster_cannot_look_anything_up(config, tmp_path):
+    assert SlackPoster(config, dry_run=True, output_dir=tmp_path).crew_ids() is None
+
+
+def test_the_tag_reaches_the_posted_payload(record, config, tmp_path):
+    """Through the poster: what goes to Slack carries the mention."""
+    trigger = fresh_trigger(record)
+    from chatterbox.slackbot.blocks import crew_blocks
+
+    blocks = crew_blocks(trigger, config, CREW_IDS)
+    poster = SlackPoster(config, dry_run=True, output_dir=tmp_path)
+    poster.post(blocks, "alert", is_test=False, label="crew")
+    payload = json.loads((tmp_path / "crew.json").read_text())
+    assert "<!subteam^S0LEAD>" in payload["blocks"][0]["text"]["text"]

@@ -25,7 +25,8 @@ site: ""
 slack:
   # The bot token must be in this environment variable. A bot token is required
   # rather than an incoming webhook, because webhooks cannot upload the plots.
-  # Scopes needed: chat:write, files:write.
+  # Scopes needed: chat:write, files:write, and usergroups:read to tag the
+  # shift crew by handle (see `crew` below).
   bot_token_env: SLACK_BOT_TOKEN
   channel: "#rso-too-monitor-dev"
   # Where alerts flagged is_test go. Leave empty to send them to `channel`,
@@ -35,6 +36,23 @@ slack:
   icon_emoji: ":boom:"
   # Slack IDs to @-mention on non-test alerts, e.g. ["!subteam^S01ABCDEF"].
   mention: []
+
+  # The shift crew each real alert tells to act. Tagged in the message itself,
+  # straight under the header. Test alerts are never tagged.
+  crew:
+    enabled: true
+    # Holds decision authority for the event.
+    lead: summit-sup-sci
+    # Told to be aware, contact the lead as soon as possible, and wait.
+    notify: [os-day-shift, os-night-shift]
+    # A mention only notifies when written with the group's ID, so IDs are looked
+    # up from the handles with usergroups.list (scope: usergroups:read). Fill
+    # this in to skip the lookup, or if the bot does not have that scope:
+    #   ids: {summit-sup-sci: S0123ABCD, os-day-shift: S0123ABCE, os-night-shift: S0123ABCF}
+    ids: {}
+    # Do not tag for an event older than this, so replaying an archived alert
+    # does not tell the shift a long-gone event needs a decision. 0 = always.
+    max_age_hours: 24
 
 ingest:
   # efd:    poll the EFD for new too_alert records (the default).

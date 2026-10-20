@@ -238,7 +238,16 @@ def process_trigger(
     dark_stats = region_hours_summary(dark_hours, trigger.localization)
     plots = _build_plots(trigger, dark_hours, template_coverage, out_dir, warnings)
 
-    blocks = build_trigger_blocks(trigger, events, dark_hours, dark_stats, template_coverage, config)
+    # The poster is needed before the blocks: tagging the shift takes Slack's
+    # user group IDs, which only it can look up. Skipped for a test alert,
+    # which tags nobody, so a replay does not spend a call to learn that.
+    if post:
+        poster = poster or SlackPoster(config)
+    crew_ids = poster.crew_ids() if poster is not None and not trigger.is_test else None
+
+    blocks = build_trigger_blocks(
+        trigger, events, dark_hours, dark_stats, template_coverage, config, crew_ids
+    )
     text = plain_text_summary(trigger, alert_class)
 
     report = TriggerReport(
@@ -254,7 +263,6 @@ def process_trigger(
     )
 
     if post:
-        poster = poster or SlackPoster(config)
         try:
             report.posted = poster.post(
                 blocks,
