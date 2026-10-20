@@ -175,9 +175,13 @@ def test_sim_reply_reports_every_band(config):
     )
     text = block_text(build_sim_reply_blocks(result, config))
     for band in ("u", "g", "r", "i", "z", "y"):
-        assert f"{band} *" in text
+        # Including the bands with nothing, which is a result in itself.
+        assert f"{band} " in text
+    assert "u 0.0%" in text
     assert "91.0%" in text
     assert "probability" in text
+    # A single unlabelled row invites both readings; the label is the point.
+    assert "ToO follow-up only" in text
 
 
 def test_sim_reply_flags_area_based_results(config):

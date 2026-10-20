@@ -3,7 +3,9 @@
 from .almanac import NightEvents, moon_separation_deg, night_events
 from .darkhours import DarkHoursMap, dark_hours_map
 from .skymap import (
+    REGION_NSIDE_FLOOR,
     KahanAdder,
+    RegionMaps,
     Skymap,
     contour_levels,
     credible_mask,
@@ -13,6 +15,7 @@ from .skymap import (
     localization_region,
     nest_to_ring,
     pixel_corner_decs,
+    region_localizations,
 )
 from .templates import TemplateCoverage, load_source_maps, load_template_maps
 
@@ -27,6 +30,9 @@ __all__ = [
     "localization_from_reward_map",
     "localization_from_probability",
     "localization_region",
+    "RegionMaps",
+    "REGION_NSIDE_FLOOR",
+    "region_localizations",
     "NightEvents",
     "night_events",
     "moon_separation_deg",

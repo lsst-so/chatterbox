@@ -192,10 +192,13 @@ def run_job(job_dir: Path) -> dict[str, Any]:
 
     from ..astro.skymap import localization_from_probability, localization_from_reward_map
     from .coverage import (
-        band_coverage_by_epoch,
+        any_band_curve,
+        campaign_time,
+        compare_coverage,
         coverage_by_night,
         coverage_curve,
         nightly_visit_maps,
+        region_coverage,
         too_visits,
         visits_overlapping,
     )
@@ -377,8 +380,19 @@ def run_job(job_dir: Path) -> dict[str, Any]:
     if skymap_path and Path(skymap_path).is_file():
         from ligo.skymap.io import read_sky_map
 
+        from ..ingest.enrich_gracedb import WORKING_NSIDE
+
         prob, _ = read_sky_map(str(skymap_path), moc=False, nest=True)
-        prob = hp.reorder(np.asarray(prob, dtype=float), n2r=True)
+        prob = np.asarray(prob, dtype=float)
+        # The same resolution the alert path degrades to, for two reasons: a
+        # full-resolution BAYESTAR map is nside 1024-2048, i.e. 12-50M pixels
+        # that `band_coverage` copies once per band; and an area quoted here
+        # against a different nside than the one the alert quoted would not
+        # match it, since the region is built from whole pixels.
+        if hp.get_nside(prob) != WORKING_NSIDE:
+            prob = hp.ud_grade(prob, WORKING_NSIDE, order_in="NESTED", order_out="RING", power=-2)
+        else:
+            prob = hp.reorder(prob, n2r=True)
         localization = localization_from_probability(
             prob, provenance=f"GraceDB skymap for {source}", credible_level=0.9
         )
@@ -386,12 +400,83 @@ def run_job(job_dir: Path) -> dict[str, Any]:
         localization = localization_from_reward_map(reward_map, reward_nside)
         logger.info("No probability skymap available; coverage will be an area fraction")
 
-    coverage = band_coverage_by_epoch(follow_up, localization)
+    # Two numbers, deliberately: `coverage` measures the ToO *strategy*, while
+    # `coverage_combined` measures what the localization actually received once
+    # nominal-cadence visits that happen to land on it are counted too. Only
+    # the difference between them is new area, since the survey re-covers
+    # pixels the follow-up already reached, so the difference is reported
+    # rather than left to be inferred by subtraction.
+    # One overlap pass, reused by the combined coverage and the curve below.
+    # A visit that cannot touch the localization cannot change its coverage,
+    # so the pre-selection is exact rather than an approximation.
+    on_localization = visits_overlapping(visits, localization)
+    result["localization_visits"] = int(len(on_localization))
+    comparison = compare_coverage(visits, localization, overlapping=on_localization)
+    coverage = comparison.too
     result["coverage"] = coverage.fractions
     result["n_visits"] = coverage.n_visits
     result["coverage_by_epoch"] = {str(k): v for k, v in coverage.epochs.items()}
     result["any_band"] = coverage.any_band
     result["quantity"] = coverage.quantity
+    result["coverage_combined"] = comparison.combined.fractions
+    result["any_band_combined"] = comparison.combined.any_band
+    result["survey_gain"] = comparison.survey_gain
+    result["survey_visits_on_localization"] = comparison.survey_n_visits
+
+    # ------------------------------------------------- credible-region stats
+
+    # The numbers above are fractions of the whole map, tails included. These
+    # are the same campaign measured inside the credible region the follow-up
+    # is planned against, and separately in probability and in area -- one
+    # does not imply the other, since covering the densest part of a region
+    # buys most of its probability while leaving most of its sky untouched.
+    try:
+        region_nside = int(sim_cfg.get("region_nside", 0)) or None
+        region = region_coverage(
+            follow_up,
+            localization,
+            combined_visits=comparison.combined_visits,
+            nside=region_nside,
+        )
+        result["region_coverage"] = {
+            "credible_level": region.credible_level,
+            "nside": region.nside,
+            "region_area_deg2": region.region_area_deg2,
+            "region_probability": region.region_probability,
+            "is_probability": region.is_probability,
+            "too_probability": region.too_probability,
+            "too_area": region.too_area,
+            "combined_probability": region.combined_probability,
+            "combined_area": region.combined_area,
+            "too_n_visits": region.too_n_visits,
+            "combined_n_visits": region.combined_n_visits,
+        }
+    except Exception as exc:
+        logger.warning("Could not measure coverage of the credible region: %s", exc)
+
+    # ---------------------------------------------------------- campaign time
+
+    # What the follow-up cost the survey, which is the other half of judging a
+    # strategy: coverage bought, against the observing time it took.
+    timing = None
+    try:
+        timing = campaign_time(visits, reference_night=trigger_night)
+        result["campaign_time"] = {
+            "too_seconds": timing.too_seconds,
+            "too_open_shutter_s": timing.too_open_shutter_s,
+            "all_seconds": timing.all_seconds,
+            "fraction": timing.fraction,
+            "n_too_visits": timing.n_too_visits,
+            "n_all_visits": timing.n_all_visits,
+            "nights": timing.nights,
+            "span_hours": timing.span_hours,
+            "by_night": timing.by_night,
+            "by_band": timing.by_band,
+            "by_epoch": timing.by_epoch,
+            "measure": timing.measure,
+        }
+    except Exception as exc:
+        logger.warning("Could not account for the campaign time: %s", exc)
 
     # ------------------------------------------------------------ curve plot
 
@@ -399,6 +484,12 @@ def run_job(job_dir: Path) -> dict[str, Any]:
         from ..plots.coverage import plot_coverage_curve
 
         curves = coverage_curve(follow_up, localization)
+        # Both totals on one axis: the follow-up alone, and the follow-up plus
+        # whatever the nominal cadence contributed.
+        too_total = any_band_curve(follow_up, localization)
+        # The same rows the combined total was measured from, so the dashed
+        # line cannot disagree with the number in the reply.
+        combined_total = any_band_curve(comparison.combined_visits, localization)
         plot_path = plot_coverage_curve(
             curves,
             localization,
@@ -406,6 +497,8 @@ def run_job(job_dir: Path) -> dict[str, Any]:
             source=source,
             alert_type=alert_type,
             event_mjd=event_mjd,
+            too_total=too_total,
+            combined_total=combined_total,
         )
         if plot_path is not None:
             result["curve_plot"] = str(plot_path)
@@ -431,6 +524,7 @@ def run_job(job_dir: Path) -> dict[str, Any]:
                 job_dir / "coverage_by_night.png",
                 source=source,
                 alert_type=alert_type,
+                timing=timing,
             )
             if night_plot is not None:
                 result["nightly_coverage_plot"] = str(night_plot)

@@ -320,6 +320,13 @@ class SimConfig:
     #: Base URL that sim artifacts are published under, if any.
     artifact_base_url: str = ""
 
+    #: Resolution the credible-region probability and area statistics are
+    #: measured at. ``0`` uses the localization's own resolution, floored at
+    #: `chatterbox.astro.skymap.REGION_NSIDE_FLOOR`; raise it only to tighten
+    #: the field-of-view quantization documented there, which costs memory
+    #: (a boolean full-sky map at nside 1024 is 12 MB) and little time.
+    region_nside: int = 0
+
     #: Post per-night, per-band visit-count maps for the nights whose visits
     #: overlap the localization contour. These go to a new Slack thread of
     #: their own rather than into the alert's thread, which a 20-night run

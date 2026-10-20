@@ -54,20 +54,42 @@ alert arrives.
 **In-thread when the simulation finishes** (~40 s for 1 night, tens of minutes
 for a full 20–50 night run):
 
-- **Expected fraction of the localization covered in each band**, plus a
-  per-epoch breakdown, a night-by-night cumulative progression, and an
-  "any band" total.
+- **Expected fraction of the localization covered in each band**, given twice:
+  once for the **ToO follow-up alone**, which is what measures the strategy, and
+  once with the **nominal-cadence visits that landed on the localization**
+  added, which is what the event actually received. The difference between them
+  is stated rather than left to be worked out — and it is the *incremental*
+  area the survey added, since survey visits re-cover pixels the follow-up
+  already reached, so the two rows do not sum.
+- **What was covered inside the 90% localization**, separately as
+  **probability** and as **area**. This is a different question from the band
+  rows above, which integrate the whole map — on a real skymap that includes
+  the probability in the tails outside the contour, which is why an any-band
+  total can sit above the credible level. Probability and area are both
+  reported because neither implies the other: covering the densest part of a
+  region buys most of its probability while leaving most of its sky
+  unobserved.
+- **What the campaign cost**: observing time the follow-up took, the nights it
+  spanned, and its share of everything observed on those nights. Coverage
+  without its cost cannot say whether a strategy is worth running.
+- A per-epoch breakdown, a night-by-night cumulative progression with the
+  follow-up minutes beside it, and an "any band" total.
 
 **And, in a thread of its own, every figure that simulation produced**, in this
 order, with a numbered line naming each one:
 
-1. **The cumulative-coverage curve** against time, per band, over the whole run.
+1. **The cumulative-coverage curve** against time, per band, over the whole
+   run, with the two any-band totals in black over them: solid for the ToO
+   follow-up alone, dashed once the nominal-cadence visits on the localization
+   are added. The gap between the two lines is the survey's contribution.
 2. **Coverage gained per night** — one bar per band per night, with the running
    any-band total stepped over the top, on an axis of **nights since the
    trigger**. This is the same total the threaded reply quotes, so the last
    point on the line can be checked against the text, and it covers *every*
-   night of the run, including any the per-night maps below leave out. Set
-   `sim.nightly_coverage_plot: false` to skip it.
+   night of the run, including any the per-night maps below leave out. A lower
+   panel carries the campaign's cost on the same night axis: follow-up minutes
+   against everything observed that night. Set `sim.nightly_coverage_plot:
+   false` to skip it.
 3. **Per-night, per-band maps of simulated visit counts** with the localization
    contour drawn on top, one figure per night. Only nights with visits that
    overlap the contour are plotted; every visit counts towards that, not just
@@ -377,6 +399,89 @@ somewhere other than the trigger's night — the driver logs a warning and the
 figure marks the boundary rather than quietly folding those visits into the
 first epoch, since a pre-trigger night is nominal cadence, not follow-up.
 
+## Which visits count as follow-up
+
+Every measurement that says "ToO" rests on telling the follow-up apart from the
+nominal cadence, and `ToOScriptedSurvey` marks each visit it schedules twice:
+
+- `observation_reason` = `too_{target_name_base}_{too_id}_i{epoch}`
+- `scheduler_note` = `"{survey_name}, {band}, {too_id}, i{epoch}"`, and every
+  ToO survey in `ts_fbs_utils` names itself `"ToO, …"`.
+
+Either alone identifies a visit, and **both are checked**: a visit tagged by one
+field and not the other is logged as a warning rather than silently dropped or
+silently included, because that disagreement is the only signal an upstream tag
+was renamed. `ToO` has to be a whole word in the note, so a survey called
+`tooth_…` does not match. The epoch is read from `observation_reason` first and
+from the note only as a fallback, since the note is a 60-character field that a
+long survey name plus a long id can truncate.
+
+Passing `observation_reason` to the survey constructor appends a
+`TrackingInfoDetailer`, which fills only fields that are still empty — checked
+in both rubin_scheduler 3.22 and 4.1.0 — so the per-visit value above, epoch
+suffix included, survives dispatch.
+
+`target_name` is deliberately not used: it is a comma-joined list of every
+survey that claimed the field.
+
+## Time accounting
+
+The campaign's cost is `visittime + slewtime` over the follow-up visits: the
+visit itself, plus the slew the interruption made the survey pay. The
+denominator is every visit on **the nights the campaign touched** — including
+nights it never reached would push the share towards zero and say nothing about
+the trade the scheduler actually made.
+
+An opsim export need not carry `slewtime`, in which case the fallback is
+`exptime` alone and both the log and the Slack post say the number is a floor,
+so an undercount cannot read as a cheap campaign.
+
+## Coverage of the credible region
+
+Two numbers are reported for the 90% region, and they are separate
+measurements of the same painted footprint:
+
+- **probability** — the region's probability under the visits, divided by the
+  probability the region contains. A campaign that tiles the region reaches
+  100%, not 90%.
+- **area** — the same footprint against uniform weight over the same pixels,
+  so it is exactly the fraction of the region's *sky*, quoted in deg² as well.
+
+Both come from `region_localizations`, which returns the region as two
+ordinary `Localization`s: one carrying the restricted and renormalized
+probability, one carrying uniform weight. Because they are ordinary
+localizations, every existing consumer works on them unchanged —
+`band_coverage` for a per-band split, `coverage_by_night`, the curves — and
+because both are painted with the same field-of-view discs at the same
+resolution, the two numbers describe an identical footprint rather than two
+that happen to be close.
+
+`RegionCoverage.too_probability_absolute` converts the region-relative
+probability back to a fraction of the whole sky, which is what the band rows
+report; the difference between them is the probability the campaign collected
+from outside the contour.
+
+The statistics are measured at nside 512 at the coarsest
+(`REGION_NSIDE_FLOOR`, overridable with `sim.region_nside`). The floor exists
+because coverage is painted with `query_disc(..., inclusive=True)`, which
+keeps every pixel a field *touches*: measured on 478 pointings, a single
+1.75° field comes out 1.48× its true area at nside 128, 1.10× at 512 and
+1.05× at 1024. An area fraction is much more sensitive to this than a
+probability, since the inflated pixels sit at the edge of the footprint where
+the density is lowest. The producer's reward map is nside 32, so without a
+floor its area numbers would flatter the strategy by roughly a factor of
+three; a test pins the effect so the constant is not quietly lowered.
+
+The simulation rasterizes the GraceDB skymap at the same nside 512 the alert
+path degrades to. A full-resolution BAYESTAR map is nside 1024–2048 — 12–50M
+pixels, copied once per band — and an area quoted against a different
+resolution than the alert quoted would not match it, since a region is built
+from whole pixels.
+
+Without a probability skymap there is no 90% contour and no probability to
+integrate, so only the area is reported, against the producer's 70% reward-map
+region, and the post says why.
+
 ## The one thing to understand: area vs probability
 
 The producer's output record carries exactly nine fields. It computes FAR,
@@ -433,7 +538,7 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 .venv/bin/python -m pytest
 ```
 
-407 tests, no network access required. Notable checks:
+463 tests, no network access required. Notable checks:
 
 - The dark-hours map is validated against `astropy`'s full `AltAz` transform —
   an independent code path from the fast approximation used in production —
@@ -457,6 +562,27 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 - Splitting coverage by night gives the same total as measuring it in one pass,
   so the last point on the per-night figure always agrees with the percentage
   quoted in the thread. A second night over the same field adds nothing.
+- Probability and area agree exactly when the weight inside the region is
+  uniform, which is the check that the two are one measurement rather than
+  two; on a peaked map a field on the peak buys more probability than area,
+  which is the reason both are quoted.
+- Probability outside the credible region does not count towards the region
+  statistics, even though the same visit contributes to the all-sky rows —
+  the distinction the two sections of the post are drawing.
+- Measuring the region at the reward map's own nside 32 overstates the covered
+  area by more than half against nside 512, which is what the resolution floor
+  exists to prevent.
+- Combined coverage is never below ToO-only coverage, per band and any-band:
+  painting is monotonic in the visit set, so a violation would mean the two
+  sides were measured against different maps. A survey visit repeating a
+  follow-up pointing is asserted to add exactly nothing.
+- A follow-up visit is recognised by *either* tag it carries, and a visit
+  tagged by one and not the other is a logged warning rather than a silently
+  empty selection — that disagreement is the only signal an upstream rename
+  gives. `tooth_survey` is asserted not to match.
+- Every `result.json` key the driver writes is a `SimResult` field. The driver
+  runs in another process and unknown keys are dropped silently, so a typo
+  would otherwise lose a measurement with nothing raised anywhere.
 - A flattened EFD row rebuilds into a record that the same decoder accepts, with
   the same area and centroid as the record it came from — asserted against a
   deliberately shuffled column order, since lexical sorting is wrong in a way
