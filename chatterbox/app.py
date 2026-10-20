@@ -30,6 +30,7 @@ from .alerts import get_alert_class
 from .astro.almanac import NightEvents, night_events
 from .astro.darkhours import DarkHoursMap, dark_hours_map
 from .astro.templates import TemplateCoverage, load_template_maps
+from .astro.visibility import field_visibility
 from .config import Config, apply_environment
 from .ingest.decode import decode_record
 from .ingest.enrich_gracedb import enrich_gravitational_wave
@@ -245,8 +246,24 @@ def process_trigger(
         poster = poster or SlackPoster(config)
     crew_ids = poster.crew_ids() if poster is not None and not trigger.is_test else None
 
+    # When the field is up, not just for how long. A failure here costs that
+    # one section, not the alert.
+    visibility = None
+    try:
+        visibility = field_visibility(
+            events,
+            trigger.localization,
+            dark_hours,
+            trigger.geometry.centroid_ra_deg,
+            trigger.geometry.centroid_dec_deg,
+            step_minutes=config.dark_hours.step_minutes,
+        )
+    except Exception as exc:
+        logger.error("Could not work out when the field is visible: %s", exc)
+        warnings.append(f"visibility windows failed: {exc}")
+
     blocks = build_trigger_blocks(
-        trigger, events, dark_hours, dark_stats, template_coverage, config, crew_ids
+        trigger, events, dark_hours, dark_stats, template_coverage, config, crew_ids, visibility
     )
     text = plain_text_summary(trigger, alert_class)
 
