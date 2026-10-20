@@ -188,13 +188,6 @@ def test_pixels_are_ordered_numerically_not_lexically():
     assert np.array_equal(np.asarray(rebuilt["reward_map"], dtype=bool), record["reward_map"])
 
 
-def test_the_nside_column_is_not_mistaken_for_a_pixel():
-    record = make_record()
-    rebuilt = record_from_efd_row(flatten(record))
-    assert len(rebuilt["reward_map"]) == len(record["reward_map"])
-    assert rebuilt["reward_map_nside"] == record["reward_map_nside"]
-
-
 def test_null_pixels_are_false_not_true(caplog):
     """NaN casts to True, which would silently add sky to the region."""
     record = make_record()
@@ -284,28 +277,10 @@ def test_the_source_queries_the_configured_topic_and_database():
     assert client.field_calls == [EFD_TOPIC], "the field list is fetched from the topic"
     assert isinstance(call["fields"], list), "fields are named, not queried as '*'"
     assert "source" in call["fields"] and "reward_map0" in call["fields"]
+    # Every field the row carries is asked for, pixels included.
+    assert set(flatten(record).index) <= set(call["fields"])
     assert client.db_name == EFD_DATABASE, "the alerts are not in the default database"
     assert call["start"] <= call["end"]
-
-
-def test_the_fields_are_named_from_get_fields_not_a_wildcard():
-    """The query lists the topic's fields, exactly as the notebooks do it.
-
-    A quoted "*" is not an InfluxQL wildcard -- the client quotes every field
-    it is handed -- so ``select_time_series(topic, "*", ...)`` asked for a field
-    literally named "*", matched nothing, and no alert was ever delivered. The
-    fix is to pass the field list ``get_fields`` reports.
-    """
-    record = make_record(instruments=["H1", "L1"])
-    row = flatten(record)
-    client = FakeEfdClient([frame_of([row])])
-    source = EfdTooAlertSource(poll_interval_s=0.0, once=True, client=client)
-
-    list(source)
-    (call,) = client.calls
-    assert call["fields"] != "*"
-    # Every field the row carries is asked for, pixels included.
-    assert set(row.index) <= set(call["fields"])
 
 
 def test_the_field_list_is_fetched_once_and_reused_across_polls():

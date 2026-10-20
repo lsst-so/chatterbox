@@ -54,6 +54,15 @@ slack:
     # does not tell the shift a long-gone event needs a decision. 0 = always.
     max_age_hours: 24
 
+# The animated airmass map posted in each alert's thread. Rendered in the
+# background after the first post, since a night is dozens of frames.
+airmass_animation:
+  enabled: true
+  mask_above: 3.8     # airmass above this is NaN (drawn grey), not coloured
+  step_minutes: 10.0  # time between frames
+  fps: 8
+  dpi: 80
+
 ingest:
   # efd:    poll the EFD for new too_alert records (the default).
   # kafka:  subscribe to the ToO producer's output topic via hop-client.

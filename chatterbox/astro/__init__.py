@@ -18,6 +18,7 @@ from .skymap import (
     region_localizations,
 )
 from .templates import TemplateCoverage, load_source_maps, load_template_maps
+from .visibility import FieldVisibility, Window, field_visibility
 
 __all__ = [
     "KahanAdder",
@@ -41,4 +42,7 @@ __all__ = [
     "TemplateCoverage",
     "load_template_maps",
     "load_source_maps",
+    "FieldVisibility",
+    "Window",
+    "field_visibility",
 ]

@@ -121,6 +121,8 @@ def config(tmp_path):
     # Tests must never reach the network or spawn a simulation.
     cfg.enrich.gracedb = False
     cfg.sim.enabled = False
+    # Tens of seconds of rendering; the tests that want it say so.
+    cfg.airmass_animation.enabled = False
     return cfg
 
 

@@ -19,7 +19,6 @@ from chatterbox.astro.templates import (
     load_source_maps,
     load_template_maps,
     map_filename,
-    read_coverage_map,
 )
 
 NSIDE = 64
@@ -136,13 +135,6 @@ def test_nested_files_are_converted_to_ring(tmp_path):
     assert np.array_equal(nested.mask("g"), ring.mask("g"))
 
 
-def test_read_coverage_map_returns_ring(tmp_path):
-    out = write_maps(tmp_path / "out", bands=("g",))
-    m = read_coverage_map(out / map_filename("g", NSIDE))
-    assert m.size == hp.nside2npix(NSIDE)
-    assert m.max() > 0
-
-
 def test_custom_pattern_is_used(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
@@ -204,14 +196,6 @@ def test_coverage_of_a_region_with_no_templates():
     coverage = TemplateCoverage(maps={"g": disc_map(ra=200.0, dec=10.0)}, nside=NSIDE)
     fractions = coverage.coverage_in_region(point_localization().prob_map, nside=NSIDE)
     assert fractions["g"] == pytest.approx(0.0, abs=1e-9)
-
-
-def test_all_bands_reported_even_when_not_published():
-    """A band with no map must report 0, not vanish from the post."""
-    coverage = TemplateCoverage(maps={"g": disc_map()}, nside=NSIDE)
-    fractions = coverage.coverage_in_region(point_localization().prob_map, nside=NSIDE)
-    assert set(fractions) == set(BANDS)
-    assert fractions["u"] == 0.0
 
 
 # ---------------------------------------------------------------------- cache

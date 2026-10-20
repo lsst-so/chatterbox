@@ -30,6 +30,7 @@ from .alerts import get_alert_class
 from .astro.almanac import NightEvents, night_events
 from .astro.darkhours import DarkHoursMap, dark_hours_map
 from .astro.templates import TemplateCoverage, load_template_maps
+from .astro.visibility import field_visibility
 from .config import Config, apply_environment
 from .ingest.decode import decode_record
 from .ingest.enrich_gracedb import enrich_gravitational_wave
@@ -78,6 +79,16 @@ class TriggerReport:
     #: The simulation that was launched, and the thread waiting to post it.
     sim_job: Any = None
     sim_thread: threading.Thread | None = None
+    #: The thread rendering and posting the airmass animation, and the file it
+    #: wrote. Like the simulation's, the thread is a daemon: it has to be
+    #: joined before the process exits or the post never happens.
+    animation_thread: threading.Thread | None = None
+    animation: Path | None = None
+
+    @property
+    def has_background_work(self) -> bool:
+        """True when a simulation or an animation is still to be posted."""
+        return self.sim_thread is not None or self.animation_thread is not None
 
     def wait_for_simulation(self, timeout: float | None = None) -> bool:
         """Block until the launched simulation has been posted.
@@ -98,10 +109,10 @@ class TriggerReport:
             False when the simulation is still running, so the caller can say
             where to find it.
         """
-        if self.sim_thread is None:
-            return True
-        self.sim_thread.join(timeout=timeout)
-        return not self.sim_thread.is_alive()
+        threads = [t for t in (self.animation_thread, self.sim_thread) if t is not None]
+        for thread in threads:
+            thread.join(timeout=timeout)
+        return not any(t.is_alive() for t in threads)
 
 
 def _build_plots(
@@ -152,6 +163,7 @@ def process_trigger(
     run_sim: bool = True,
     sim_wait: bool = False,
     out_dir: Path | None = None,
+    run_animation: bool = True,
 ) -> TriggerReport:
     """Handle one ToO record end to end.
 
@@ -172,6 +184,9 @@ def process_trigger(
         than in a background thread. Used by the CLI.
     out_dir : `pathlib.Path`, optional
         Where plots are written. Defaults to a per-source work directory.
+    run_animation : `bool`
+        Render the airmass animation and post it in the alert's thread, when
+        ``airmass_animation.enabled`` and the alert is actually being posted.
 
     Returns
     -------
@@ -245,8 +260,24 @@ def process_trigger(
         poster = poster or SlackPoster(config)
     crew_ids = poster.crew_ids() if poster is not None and not trigger.is_test else None
 
+    # When the field is up, not just for how long. A failure here costs that
+    # one section, not the alert.
+    visibility = None
+    try:
+        visibility = field_visibility(
+            events,
+            trigger.localization,
+            dark_hours,
+            trigger.geometry.centroid_ra_deg,
+            trigger.geometry.centroid_dec_deg,
+            step_minutes=config.dark_hours.step_minutes,
+        )
+    except Exception as exc:
+        logger.error("Could not work out when the field is visible: %s", exc)
+        warnings.append(f"visibility windows failed: {exc}")
+
     blocks = build_trigger_blocks(
-        trigger, events, dark_hours, dark_stats, template_coverage, config, crew_ids
+        trigger, events, dark_hours, dark_stats, template_coverage, config, crew_ids, visibility
     )
     text = plain_text_summary(trigger, alert_class)
 
@@ -284,10 +315,73 @@ def process_trigger(
         len(warnings),
     )
 
+    if run_animation and post and config.airmass_animation.enabled:
+        _start_animation(trigger, config, events, poster, report, out_dir)
+
     if run_sim:
         _start_simulation(trigger, config, poster, report, sim_wait=sim_wait)
 
     return report
+
+
+def _start_animation(
+    trigger: Trigger,
+    config: Config,
+    events: NightEvents,
+    poster: SlackPoster,
+    report: TriggerReport,
+    out_dir: Path,
+) -> None:
+    """Render the airmass animation off the main thread and post it in-thread.
+
+    A night is dozens of frames and takes tens of seconds, so it cannot be part
+    of the first post. It is posted as a reply to it instead -- or standalone,
+    when the first post could not be threaded onto.
+    """
+    from .plots.airmass_animation import plot_airmass_animation
+    from .slackbot.blocks import build_airmass_animation_blocks
+
+    settings = config.airmass_animation
+
+    def render_and_post() -> None:
+        # A background thread's exceptions are invisible, so everything is
+        # caught here and logged: a missing animation must never take the alert
+        # path down, and it has no right to take a worker thread down silently.
+        try:
+            path = plot_airmass_animation(
+                events,
+                trigger.localization,
+                out_dir / f"{trigger.source}_airmass.gif",
+                mask_above=settings.mask_above,
+                step_minutes=settings.step_minutes,
+                sun_alt_limit_deg=config.dark_hours.sun_alt_limit_deg,
+                centroid=(trigger.geometry.centroid_ra_deg, trigger.geometry.centroid_dec_deg),
+                fps=settings.fps,
+                dpi=settings.dpi,
+            )
+            report.animation = path
+        except Exception as exc:
+            logger.error("Could not render the airmass animation for %s: %s", trigger.source, exc)
+            report.warnings.append(f"airmass animation failed: {exc}")
+            return
+
+        try:
+            blocks = build_airmass_animation_blocks(
+                trigger, events, settings.mask_above, config.dark_hours.sun_alt_limit_deg
+            )
+            text = f"Airmass through the first night for {trigger.source}"
+            label = f"{trigger.source}_airmass"
+            if report.posted is not None:
+                poster.reply(report.posted, blocks, text, files=[path], label=label)
+            else:
+                poster.post(blocks, text, is_test=trigger.is_test, files=[path], label=label)
+        except Exception as exc:
+            logger.error("Could not post the airmass animation for %s: %s", trigger.source, exc)
+            report.warnings.append(f"airmass animation post failed: {exc}")
+
+    thread = threading.Thread(target=render_and_post, name=f"airmass-{trigger.source}", daemon=True)
+    thread.start()
+    report.animation_thread = thread
 
 
 def post_sim_results(
@@ -484,7 +578,11 @@ def _start_simulation(
 
 
 def run_service(
-    config: Config, paths=None, run_sim: bool = True, lookback_s: float | None = None
+    config: Config,
+    paths=None,
+    run_sim: bool = True,
+    lookback_s: float | None = None,
+    run_animation: bool = True,
 ) -> int:
     """Consume the configured source and post about every record.
 
@@ -499,6 +597,8 @@ def run_service(
     lookback_s : `float`, optional
         Override for the EFD first-poll lookback (from ``serve
         --since/--lookback``). `None` keeps ``ingest.efd_lookback_s``.
+    run_animation : `bool`
+        Render and post the airmass animation under each alert.
 
     Returns
     -------
@@ -515,9 +615,11 @@ def run_service(
         for record, metadata in source:
             origin = metadata.get("origin") or metadata.get("topic") or metadata.get("transport") or ""
             try:
-                report = process_trigger(record, config, poster=poster, run_sim=run_sim)
+                report = process_trigger(
+                    record, config, poster=poster, run_sim=run_sim, run_animation=run_animation
+                )
                 pending = [r for r in pending if not r.wait_for_simulation(timeout=0)]
-                if report.sim_thread is not None:
+                if report.has_background_work:
                     pending.append(report)
                 handled += 1
             except Exception as exc:

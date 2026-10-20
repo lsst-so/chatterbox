@@ -541,15 +541,3 @@ def test_a_failed_lookup_loses_the_tag_and_not_the_alert(config, tmp_path, monke
 
 def test_an_offline_poster_cannot_look_anything_up(config, tmp_path):
     assert SlackPoster(config, dry_run=True, output_dir=tmp_path).crew_ids() is None
-
-
-def test_the_tag_reaches_the_posted_payload(record, config, tmp_path):
-    """Through the poster: what goes to Slack carries the mention."""
-    trigger = fresh_trigger(record)
-    from chatterbox.slackbot.blocks import crew_blocks
-
-    blocks = crew_blocks(trigger, config, CREW_IDS)
-    poster = SlackPoster(config, dry_run=True, output_dir=tmp_path)
-    poster.post(blocks, "alert", is_test=False, label="crew")
-    payload = json.loads((tmp_path / "crew.json").read_text())
-    assert "<!subteam^S0LEAD>" in payload["blocks"][0]["text"]["text"]

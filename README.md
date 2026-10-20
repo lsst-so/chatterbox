@@ -18,7 +18,27 @@ result of a scheduler simulation.
 - **Sun and Moon statistics** for the relevant night: sunset/sunrise, the
   −12° and −18° crossings, moonrise/moonset, illumination, and the Moon's
   separation from the localization. In UTC and Chile local time.
+- **When the field is visible**: the window during the night in which the
+  localization is above the airmass limit, in UTC with Chile local beside it.
+  Given for the centroid (with when it is highest), for *any part* of the
+  region, and for *most of it* (over half its probability, or its area when
+  only the producer's map is available), plus the moment the largest share is
+  up. A window cut off by sunset or sunrise rather than by the field setting
+  is marked `(dusk)` or `(dawn)`, since "until 06:24" means something else when
+  that is just the end of the night. It uses the dark-hours map's own limits,
+  so the hours there and the times here cannot disagree.
 - **Weather and site links** for Cerro Pachón, combined with the above.
+- **An animated airmass map**, posted in the alert's thread a little after the
+  first post. Each frame is the airmass of the whole sky at one moment of the
+  first night (Sun below −12°), with the localization contour over it; a
+  compact localization also gets a zoomed panel beside the all-sky one. Anything
+  above airmass 3.8, or below the horizon, is masked to NaN and drawn grey
+  rather than coloured, so a field on the horizon cannot be mistaken for one
+  that is merely a little worse. Rendering takes tens of seconds, which the
+  first post cannot afford, so it runs in a background thread; it is a GIF
+  because Slack plays those inline and no video encoder has to be installed.
+  Switch it off with `airmass_animation.enabled: false`, or for one run with
+  `--no-animation`. A dry run posts nothing and so renders nothing.
 - **Localization contour over accessible dark hours** — a full-sky map coloured
   by hours per pixel with airmass < 2 while the Sun is below −12°, with the
   localization drawn on top.
@@ -538,8 +558,12 @@ match the areas the producer cut on, and so tests can build faithful fixtures.
 .venv/bin/python -m pytest
 ```
 
-463 tests, no network access required. Notable checks:
+488 tests, no network access required. Notable checks:
 
+- The visibility windows are checked against `astropy`'s `AltAz`: the edges sit
+  on the altitude limit, the peak matches, and the window length agrees with
+  the dark-hours map's hours for the same pixel. Probability in a skymap's
+  tails does not make a field visible; only its credible region counts.
 - The dark-hours map is validated against `astropy`'s full `AltAz` transform —
   an independent code path from the fast approximation used in production —
   and agrees to about one minute per pixel.

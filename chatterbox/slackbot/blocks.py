@@ -17,6 +17,7 @@ from ..alerts import AlertClass, FollowupStrategy, get_alert_class, get_strategy
 from ..astro.almanac import CHILE_TZ, NightEvents, format_time, moon_separation_deg
 from ..astro.darkhours import DarkHoursMap
 from ..astro.templates import TemplateCoverage
+from ..astro.visibility import FieldVisibility, Window
 from ..config import Config
 from ..links import format_link_list, gracedb_link, site_links
 from ..models import Trigger
@@ -24,6 +25,7 @@ from ..sim.runner import SimResult
 
 __all__ = [
     "build_trigger_blocks",
+    "build_airmass_animation_blocks",
     "crew_blocks",
     "build_sim_reply_blocks",
     "build_sim_figures_blocks",
@@ -300,12 +302,68 @@ def _alert_blocks(trigger: Trigger, alert_class: AlertClass) -> list[dict[str, A
 # ------------------------------------------------------------- observability
 
 
+def _clock(t) -> str:
+    """``HH:MM UTC [HH:MM Chile]``, undated: the night is stated above."""
+    return f"{t.utc.strftime('%H:%M')} UTC [{format_time(t, CHILE_TZ)}]"
+
+
+def _span(window: Window) -> str:
+    """A window as ``start -> end (h)``, noting dusk or dawn bounds."""
+    start = _clock(window.start) + (" _(dusk)_" if window.starts_at_dusk else "")
+    end = _clock(window.end) + (" _(dawn)_" if window.ends_at_dawn else "")
+    return f"{start}  ->  {end}  ({window.hours:.1f} h)"
+
+
+def _visibility_lines(trigger: Trigger, visibility: FieldVisibility) -> list[str]:
+    """When the field is up, from the centroid and from the region as a whole.
+
+    The two answer different questions. The centroid gives one clean window,
+    which is what an observer reads first; the region says how much of an
+    extended localization is reachable at once, which for a large GW map is
+    often the number that matters.
+    """
+    quantity = visibility.quantity
+    lines = [
+        f"*When the field is visible* (airmass < {visibility.airmass_limit:g}, altitude > "
+        f"{visibility.altitude_limit_deg:.0f} deg, Sun < {visibility.sun_alt_limit_deg:g} deg; "
+        f"UTC, Chile local in brackets)"
+    ]
+
+    if visibility.centroid is None:
+        lines.append(":warning: The localization centroid never reaches the airmass limit during this night.")
+    elif visibility.centroid.whole_night:
+        lines.append(f"Centroid: up all night ({visibility.centroid.hours:.1f} h)")
+    else:
+        lines.append(f"Centroid: {_span(visibility.centroid)}")
+    if visibility.peak_time is not None and visibility.centroid is not None:
+        lines.append(
+            f"Highest at {_clock(visibility.peak_time)}, altitude {visibility.peak_altitude_deg:.0f} deg"
+        )
+
+    if visibility.any_part is None:
+        lines.append(":warning: No part of the localization is up at any time during this night.")
+        return lines
+
+    lines.append(f"Any part of the localization: {_span(visibility.any_part)}")
+    if visibility.most is not None:
+        lines.append(f"Most of it (over half the {quantity}): {_span(visibility.most)}")
+    else:
+        lines.append(f"There is no time at which over half the {quantity} is up.")
+    if visibility.best_time is not None:
+        lines.append(
+            f"Best at {_clock(visibility.best_time)}, with "
+            f"{visibility.best_fraction:.0%} of the {quantity} up"
+        )
+    return lines
+
+
 def _observability_blocks(
     trigger: Trigger,
     events: NightEvents,
     dark_hours: DarkHoursMap,
     dark_stats: dict[str, float],
     config: Config,
+    visibility: FieldVisibility | None = None,
 ) -> list[dict[str, Any]]:
     geo = trigger.geometry
     moon_sep = moon_separation_deg(geo.centroid_ra_deg, geo.centroid_dec_deg, events)
@@ -371,6 +429,8 @@ def _observability_blocks(
         _section("\n".join(moon_lines)),
         _section("\n".join(dark_lines)),
     ]
+    if visibility is not None:
+        blocks.append(_section("\n".join(_visibility_lines(trigger, visibility))))
     if links:
         blocks.append(_section("*Site conditions*\n" + format_link_list(links)))
     return blocks
@@ -449,6 +509,7 @@ def build_trigger_blocks(
     template_coverage: TemplateCoverage | None,
     config: Config,
     crew_ids: dict[str, str] | None = None,
+    visibility: FieldVisibility | None = None,
 ) -> list[dict[str, Any]]:
     """Build the Block Kit payload for the first post about a trigger.
 
@@ -468,6 +529,8 @@ def build_trigger_blocks(
         Configuration, for links and the shift crew.
     crew_ids : `dict` [`str`, `str`], optional
         Slack user group IDs by handle; see `crew_blocks`.
+    visibility : `FieldVisibility`, optional
+        When the field is up during the night; omitted from the post when None.
 
     Returns
     -------
@@ -484,7 +547,7 @@ def build_trigger_blocks(
     blocks.append(_divider())
     blocks += _alert_blocks(trigger, alert_class)
     blocks.append(_divider())
-    blocks += _observability_blocks(trigger, events, dark_hours, dark_stats, config)
+    blocks += _observability_blocks(trigger, events, dark_hours, dark_stats, config, visibility)
     blocks.append(_divider())
     blocks += _template_blocks(trigger, template_coverage)
     blocks += _strategy_blocks(strategy, alert_class)
@@ -589,6 +652,46 @@ def _region_lines(result: SimResult) -> list[str]:
             f"producer's {level:.0f}% reward map._"
         )
     return lines
+
+
+def build_airmass_animation_blocks(
+    trigger: Trigger,
+    events: NightEvents,
+    mask_above: float,
+    sun_alt_limit_deg: float = -12.0,
+) -> list[dict[str, Any]]:
+    """The caption posted with the animated airmass map.
+
+    Parameters
+    ----------
+    trigger : `Trigger`
+        The alert, for what the contour is.
+    events : `NightEvents`
+        The night animated.
+    mask_above : `float`
+        Airmass above which the map is masked, stated so the grey is not a
+        mystery.
+    sun_alt_limit_deg : `float`
+        Sun altitude bounding the animated window.
+
+    Returns
+    -------
+    blocks : `list` [`dict`]
+    """
+    start, end = events.observing_window(sun_alt_limit_deg)
+    from astropy.time import Time
+
+    first, last = Time(start, format="mjd", scale="utc"), Time(end, format="mjd", scale="utc")
+    loc = trigger.localization
+    return [
+        _section(
+            f":movie_camera: *Airmass through the first night* ({events.day_obs})\n"
+            f"Each frame is the airmass of the whole sky at one moment, from {_clock(first)} to "
+            f"{_clock(last)} (Sun below {sun_alt_limit_deg:g} deg; UTC, Chile local in brackets). "
+            f"The red contour is the {loc.credible_level:.0%} {loc.quantity_name}-weighted "
+            f"localization. Grey is below the horizon or above airmass {mask_above:g}."
+        )
+    ]
 
 
 def build_sim_reply_blocks(result: SimResult, config: Config) -> list[dict[str, Any]]:

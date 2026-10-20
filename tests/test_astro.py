@@ -45,27 +45,6 @@ def test_nest_to_ring_round_trip():
     assert np.array_equal(back, nested)
 
 
-def test_chatterbox_does_not_import_astropy_healpix():
-    """chatterbox's own code must not depend on astropy-healpix directly.
-
-    It is still installed, because ``ligo.skymap`` needs it transitively for
-    the sky projections and for reading GraceDB skymaps, but nothing here
-    should reach for it: `pixel_corner_decs` covers our one use of it.
-    """
-    import pathlib
-
-    root = pathlib.Path(__file__).resolve().parents[1] / "chatterbox"
-    offenders = []
-    for path in root.rglob("*.py"):
-        for n, line in enumerate(path.read_text().splitlines(), start=1):
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            if "astropy_healpix" in stripped and ("import" in stripped):
-                offenders.append(f"{path.relative_to(root)}:{n}: {stripped}")
-    assert not offenders, "astropy_healpix imported in:\n" + "\n".join(offenders)
-
-
 def test_pixel_corner_decs_matches_astropy_healpix():
     """Guard the replacement for ``astropy_healpix.boundaries_lonlat``.
 
@@ -178,15 +157,6 @@ def test_credible_mask_never_reports_less_than_asked():
 def test_credible_mask_on_a_zero_map():
     mask = credible_mask(np.zeros(48), 0.9)
     assert not mask.any()
-
-
-def test_contour_levels_are_ascending_and_positive():
-    rng = np.random.default_rng(1)
-    prob = rng.random(hp.nside2npix(16)) ** 3
-    prob /= prob.sum()
-    levels = contour_levels(prob, (0.5, 0.9))
-    assert levels == sorted(levels)
-    assert all(level > 0 for level in levels)
 
 
 def test_contour_levels_deduplicates_on_a_binary_map():

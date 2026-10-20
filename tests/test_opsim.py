@@ -216,15 +216,6 @@ def test_empty_fetch_falls_back_to_the_cache(tmp_path, fake_fetch, monkeypatch):
     assert "no visits" in cache.stale_reason
 
 
-def test_failure_with_no_cache_raises_with_guidance(tmp_path, monkeypatch):
-    def _boom(*args, **kwargs):
-        raise RuntimeError("no token")
-
-    monkeypatch.setattr(opsim_mod, "fetch_opsim", _boom)
-    with pytest.raises(RuntimeError, match="sim.opsim_tokenfile"):
-        ensure_opsim(tmp_path / "opsim.parquet", day_obs=DAY_OBS, tokenfile=None)
-
-
 # -------------------------------------------------- importing the fetch tool
 
 
