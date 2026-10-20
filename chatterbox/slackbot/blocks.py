@@ -24,6 +24,7 @@ from ..sim.runner import SimResult
 
 __all__ = [
     "build_trigger_blocks",
+    "crew_blocks",
     "build_sim_reply_blocks",
     "build_sim_figures_blocks",
     "build_failure_blocks",
@@ -116,6 +117,102 @@ def _header_blocks(trigger: Trigger, alert_class: AlertClass) -> list[dict[str, 
         {"type": "header", "text": {"type": "plain_text", "text": _plain_header(trigger, alert_class)}},
         _section(header + "\n" + "\n".join(lines)),
     ]
+
+
+# ----------------------------------------------------------------------- crew
+
+
+def _mention(handle: str, ids: dict[str, str]) -> str:
+    """A Slack mention of a user group, which only pings when it has an ID.
+
+    ``@handle`` typed as text is displayed but notifies nobody, so a group
+    whose ID is unknown renders as that plain text and `crew_blocks` says so.
+    """
+    group_id = ids.get(handle, "")
+    return f"<!subteam^{group_id}>" if group_id else f"@{handle}"
+
+
+def crew_blocks(
+    trigger: Trigger,
+    config: Config,
+    ids: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Tell the people on shift that they have a job to do.
+
+    The summit support scientist is named as the decision-maker; the day and
+    night observing specialists are told to be aware, contact them as soon as
+    possible, and wait for instructions rather than act on their own.
+
+    Parameters
+    ----------
+    trigger : `Trigger`
+        The alert, for its test flag and age.
+    config : `Config`
+        Configuration naming the groups; see `chatterbox.config.CrewConfig`.
+    ids : `dict` [`str`, `str`], optional
+        User group IDs by handle, from `SlackPoster.crew_ids`. A group missing
+        from it is written as plain text, which does not notify anyone, and
+        the post says so. None means the IDs could not be looked up at all --
+        a dry run -- and is rendered without that warning, which would
+        otherwise be a claim about a post that was never sent.
+
+    Returns
+    -------
+    blocks : `list` [`dict`]
+        Empty when the crew is switched off. When the crew is deliberately
+        *not* being tagged -- a test alert, or an event too old to act on --
+        a single context line says so, so the absence cannot be mistaken for
+        the feature being broken.
+    """
+    crew = config.slack.crew
+    handles = crew.handles()
+    if not crew.enabled or not handles:
+        return []
+
+    looked_up = ids is not None
+    ids = {**crew.ids, **(ids or {})}
+    lead = crew.lead.strip().lstrip("@")
+    notify = [h for h in (n.strip().lstrip("@") for n in crew.notify) if h and h != lead]
+    names = ", ".join(f"@{h}" for h in handles)
+
+    if trigger.is_test:
+        return [_context(f":test_tube: Test alert, so the shift was not tagged (a real one tags {names}).")]
+
+    age_s = trigger.age_s
+    if crew.max_age_hours > 0 and age_s is not None and age_s > crew.max_age_hours * 3600.0:
+        return [
+            _context(
+                f":hourglass: The event is {_duration(age_s)} old, so the shift was not tagged "
+                f"(`slack.crew.max_age_hours` is {crew.max_age_hours:g})."
+            )
+        ]
+
+    lines = []
+    if lead:
+        lines.append(
+            f":rotating_light: {_mention(lead, ids)} -- you are the summit support scientist on shift for "
+            "this event, and you have the authority to make decisions about it."
+        )
+    if notify:
+        lines.append(
+            f"{' '.join(_mention(h, ids) for h in notify)} -- please be aware of this event. Get in "
+            "contact with your summit support scientist as soon as possible, and await further "
+            "instructions from them."
+        )
+
+    blocks = [_section("\n".join(lines))]
+    unresolved = [h for h in handles if not ids.get(h)]
+    if unresolved and looked_up:
+        # Loud, because a post that looks tagged and notifies nobody is worse
+        # than one that is plainly untagged.
+        blocks.append(
+            _context(
+                ":warning: Not notified: no Slack user group ID for "
+                + ", ".join(f"@{h}" for h in unresolved)
+                + ". Set `slack.crew.ids` or give the bot the `usergroups:read` scope."
+            )
+        )
+    return blocks
 
 
 def _plain_header(trigger: Trigger, alert_class: AlertClass) -> str:
@@ -351,6 +448,7 @@ def build_trigger_blocks(
     dark_stats: dict[str, float],
     template_coverage: TemplateCoverage | None,
     config: Config,
+    crew_ids: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the Block Kit payload for the first post about a trigger.
 
@@ -367,7 +465,9 @@ def build_trigger_blocks(
     template_coverage : `TemplateCoverage` or None
         Cached template maps, or None when unavailable.
     config : `Config`
-        Configuration, for links.
+        Configuration, for links and the shift crew.
+    crew_ids : `dict` [`str`, `str`], optional
+        Slack user group IDs by handle; see `crew_blocks`.
 
     Returns
     -------
@@ -378,6 +478,9 @@ def build_trigger_blocks(
 
     blocks: list[dict[str, Any]] = []
     blocks += _header_blocks(trigger, alert_class)
+    # Straight after the header: this is the part of the post somebody has to
+    # act on, and it should not be below the fold on a phone.
+    blocks += crew_blocks(trigger, config, crew_ids)
     blocks.append(_divider())
     blocks += _alert_blocks(trigger, alert_class)
     blocks.append(_divider())

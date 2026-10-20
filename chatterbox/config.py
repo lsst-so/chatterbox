@@ -22,6 +22,7 @@ import yaml
 __all__ = [
     "Config",
     "SlackConfig",
+    "CrewConfig",
     "IngestConfig",
     "DarkHoursConfig",
     "TemplateConfig",
@@ -91,6 +92,51 @@ _validated_data_dir: Path | None = None
 
 
 @dataclass
+class CrewConfig:
+    """Who the alert tells to act, as distinct from who it pings.
+
+    A ToO that arrives with nobody reading ``#too-alerts`` is a lost
+    opportunity, so the post names the people on shift who have a job to do.
+    Roles differ: the summit support scientist decides, and the observing
+    specialists are told to find them and wait. The groups are Slack *user
+    groups*, which follow the rota, so nobody is named personally and the
+    configuration does not go stale when the shift changes.
+
+    Notes
+    -----
+    A mention only pings when it is written with the group's **ID**
+    (``<!subteam^S0123>``). The handle alone is just text, so the poster looks
+    IDs up from the handles with ``usergroups.list`` (scope
+    ``usergroups:read``) unless `ids` supplies them, and says so loudly when
+    it cannot.
+    """
+
+    #: Tag the crew on real alerts. Test alerts are never tagged.
+    enabled: bool = True
+    #: User group that holds decision authority for the event.
+    lead: str = "summit-sup-sci"
+    #: User groups told to be aware, contact the lead, and wait for them.
+    notify: list[str] = field(default_factory=lambda: ["os-day-shift", "os-night-shift"])
+    #: ``{handle: "S0123ABCD"}``. Skips the lookup, which is also the only way
+    #: to tag when the bot token lacks ``usergroups:read``.
+    ids: dict[str, str] = field(default_factory=dict)
+    #: Do not tag for an event older than this many hours when the bot sees
+    #: it. A replay of an archived alert, or the EFD poller catching up after
+    #: a restart, would otherwise tell the shift that a long-gone event needs a
+    #: decision. ``0`` tags regardless of age.
+    max_age_hours: float = 24.0
+
+    def handles(self) -> list[str]:
+        """Every group the post mentions, lead first, without duplicates."""
+        seen: list[str] = []
+        for handle in [self.lead, *self.notify]:
+            handle = handle.strip().lstrip("@")
+            if handle and handle not in seen:
+                seen.append(handle)
+        return seen
+
+
+@dataclass
 class SlackConfig:
     """Slack destination and credentials.
 
@@ -111,6 +157,8 @@ class SlackConfig:
     #: Slack user/group IDs to mention on non-test alerts, e.g.
     #: ``["!subteam^S123"]``.
     mention: list[str] = field(default_factory=list)
+    #: The shift crew the post tells to act; see `CrewConfig`.
+    crew: CrewConfig = field(default_factory=CrewConfig)
 
 
 @dataclass

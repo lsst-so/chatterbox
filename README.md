@@ -28,6 +28,29 @@ result of a scheduler simulation.
 - **The planned follow-up**: epochs, bands, visit counts and exposure times,
   read live from `ts_fbs_utils` so it cannot drift from what the scheduler runs.
 
+**Tagging the shift.** Directly under the header, a real alert tells the
+people on duty what is expected of them: the **summit support scientist** is
+named as the one with authority to make decisions about the event, and the
+**day and night observing specialists** are told to be aware of it, get in
+contact with their support scientist as soon as possible, and await further
+instructions. The three Slack user groups are configured under `slack.crew`
+(`summit-sup-sci`, `os-day-shift`, `os-night-shift` by default) and follow the
+rota, so nobody is named personally.
+
+Three cases are deliberately **not** tagged, and the post says which: a
+`is_test` alert, an event older than `slack.crew.max_age_hours` (24 by
+default, so replaying an archived alert cannot tell the shift that a
+long-gone event needs a decision), and a crew switched off with
+`slack.crew.enabled: false`.
+
+A Slack mention only notifies when written with the group's **ID**; the
+handle typed as text looks identical and pings nobody. The bot looks the IDs up
+from the handles once (`usergroups.list`, scope `usergroups:read`), or you can
+give them in `slack.crew.ids` to skip the lookup. If a group cannot be
+resolved the post names it in plain text and carries a visible warning that it
+was not notified, and `chatterbox doctor` reports the same thing before an
+alert arrives.
+
 **In-thread when the simulation finishes** (~40 s for 1 night, tens of minutes
 for a full 20–50 night run):
 
@@ -116,7 +139,7 @@ Then set the bot token in the environment — it is never stored in the config:
 export SLACK_BOT_TOKEN=xoxb-...
 ```
 
-The token needs the `chat:write` and `files:write` scopes. A bot token is
+The token needs the `chat:write` and `files:write` scopes, plus `usergroups:read` to tag the shift crew by handle. A bot token is
 required rather than an incoming webhook because webhooks cannot upload files,
 and every post carries plots.
 
